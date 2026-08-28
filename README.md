@@ -1,0 +1,93 @@
+# mldsa-native-provider
+
+An external OpenSSL 3.5+ provider implementing **ML-DSA** (FIPS 204) digital
+signatures — and nothing else — on top of the
+[mldsa-native](https://github.com/pq-code-package/mldsa-native) implementation.
+
+> ⚠️ **AI-generated — not for production use.** Like
+> [oqs-provider](https://github.com/open-quantum-safe/oqs-provider), this is a
+> vehicle for experimentation and interoperability research. It has not been
+> reviewed or audited to production standards.
+
+## What it is
+
+- Serves **ML-DSA-44 / ML-DSA-65 / ML-DSA-87** as keymgmt + signature +
+  encoder/decoder operations under the standard names, OIDs and TLS/PKIX
+  identifiers (`2.16.840.1.101.3.4.3.17/.18/.19`).
+- All ML-DSA arithmetic comes **directly from mldsa-native** (vendored under
+  [`vendor/`](vendor)). The provider does **not** delegate to OpenSSL's own
+  ML-DSA or any other intermediate crypto API. The only OpenSSL crypto used is
+  the DRBG (`RAND_bytes`), as the entropy source for key/seed generation.
+- **Signatures only — no KEM.**
+
+This differs from its siblings
+[hybrid-provider](https://github.com/baentsch/hybrid-provider) and oqs-provider,
+which compose or delegate to other providers/libraries: here the FIPS 204 core
+is mldsa-native and nothing else.
+
+## Interoperability with the OpenSSL default provider
+
+Verified by the test suite and byte-for-byte against OpenSSL 3.5's default
+provider:
+
+- **Seed-expansion parity** — importing the same 32-byte seed into both
+  providers yields the identical public key.
+- **Cross sign/verify** — a signature produced by one provider verifies with
+  the other, in both directions (pure ML-DSA, empty context).
+- **Key-file formats** — public keys as `SubjectPublicKeyInfo` (raw key in the
+  BIT STRING) and private keys as PKCS#8 in the default provider's `seed-priv`
+  form: `privateKey OCTET STRING { SEQUENCE { OCTET STRING seed(32),
+  OCTET STRING expandedKey } }`. PEM/DER written by one side is read by the
+  other; the DER is byte-identical in shape to the default provider's.
+- **Known-answer tests** — deterministic keygen and signing reproduce the
+  FIPS 204 test vectors shipped with mldsa-native.
+
+## Build
+
+Requires OpenSSL **3.5+** (ML-DSA landed in 3.5.0), CMake 3.16+, a C11 compiler.
+
+```sh
+cmake -S . -B build -DOPENSSL_ROOT_DIR=/path/to/openssl-3.5
+cmake --build build
+```
+
+This produces `build/mldsanative.so`.
+
+## Test
+
+```sh
+cd build
+ctest --output-on-failure
+```
+
+- `kat`     — FIPS 204 known-answer tests through the provider (EVP API).
+- `interop` — parity / cross sign-verify / key-file round-trips against the
+  default provider.
+
+To use the provider from the CLI, point `OPENSSL_MODULES` at the build
+directory:
+
+```sh
+export OPENSSL_MODULES=$PWD/build
+openssl list -signature-algorithms -provider mldsanative
+openssl genpkey -provider mldsanative -provider default \
+    -propquery '?provider=mldsanative' -algorithm ML-DSA-65 -out key.pem
+```
+
+## Layout
+
+```
+mldsa_native_prov.{c,h}     provider entry, algorithm tables, param sets, RNG hook
+mldsa_native_keymgmt.c      keymgmt: seed/pub/priv import-export, keygen, params
+mldsa_native_sig.c          signature: pure ML-DSA sign/verify (+ context, KAT entropy)
+mldsa_native_encoder.c      SPKI + PKCS8 encoders (DER + PEM)
+mldsa_native_decoder.c      SPKI + PKCS8 decoders (DER; PEM via OpenSSL pem2der)
+vendor/                     vendored mldsa-native (multi-level monolithic build)
+test/                       KAT + interop tests and FIPS 204 vectors
+```
+
+## Vendored code & license
+
+The provider code is Apache-2.0. `vendor/` contains a snapshot of
+[mldsa-native](https://github.com/pq-code-package/mldsa-native)
+(Apache-2.0 OR ISC OR MIT); see `vendor/mldsa_native/` for its notices.

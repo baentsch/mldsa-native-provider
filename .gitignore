@@ -1,0 +1,17 @@
+# Build output
+build/
+build*/
+*.o
+*.so
+*.a
+*.d
+
+# Upstream mldsa-native checkout (only vendor/ is tracked)
+/mldsa-native/
+
+# Editor / misc
+*.swp
+*~
+
+# Local Claude Code settings
+.claude/
