@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Demonstrate the version story:
+#   * openssl-3.2 : the provider builds and its FIPS-204 KAT passes; the
+#                   default-provider interop and IETF X.509 interop self-skip
+#                   (the default provider / libcrypto have no ML-DSA before 3.5).
+#   * openssl-3.5 : everything runs, including cross-provider interop and the
+#                   IETF pqc-certificates cross-implementation interop.
+jobs:
+  build-test:
+    name: openssl ${{ matrix.ossl-branch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ossl-branch: openssl-3.2
+          - ossl-branch: openssl-3.5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake unzip
+
+      - name: Cache OpenSSL build
+        id: cache-ossl
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/ossl
+          key: ossl-${{ matrix.ossl-branch }}-v1
+
+      - name: Build OpenSSL (${{ matrix.ossl-branch }})
+        if: steps.cache-ossl.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 -b ${{ matrix.ossl-branch }} \
+            https://github.com/openssl/openssl.git ossl-src
+          cd ossl-src
+          ./Configure --prefix="${{ github.workspace }}/ossl" --libdir=lib no-docs
+          make -j"$(nproc)"
+          make install_sw
+
+      - name: Report OpenSSL version
+        run: |
+          O="${{ github.workspace }}/ossl"
+          LD_LIBRARY_PATH="$O/lib" "$O/bin/openssl" version
+
+      - name: Configure & build the provider
+        run: |
+          O="${{ github.workspace }}/ossl"
+          cmake -S . -B build \
+            -DOPENSSL_ROOT_DIR="$O" \
+            -DOPENSSL_INCLUDE_DIR="$O/include" \
+            -DOPENSSL_CRYPTO_LIBRARY="$O/lib/libcrypto.so" \
+            -DOPENSSL_SSL_LIBRARY="$O/lib/libssl.so"
+          cmake --build build -j"$(nproc)"
+
+      - name: Show advertised algorithms
+        run: |
+          O="${{ github.workspace }}/ossl"
+          LD_LIBRARY_PATH="$O/lib" OPENSSL_MODULES="$PWD/build" \
+            "$O/bin/openssl" list -signature-algorithms -provider mldsanative
+
+      - name: Run tests (KAT + interop + IETF pqc-certificates)
+        run: |
+          O="${{ github.workspace }}/ossl"
+          LD_LIBRARY_PATH="$O/lib" ctest --test-dir build --output-on-failure --no-tests=error

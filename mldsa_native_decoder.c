@@ -146,39 +146,70 @@ static MLDSA_KEY *decode_pki(MLDSA_DEC_CTX *ctx, const unsigned char *der,
     if (key == NULL)
         goto end;
 
-    if (pklen > 0 && pk[0] == (V_ASN1_SEQUENCE | V_ASN1_CONSTRUCTED)) {
-        /* seed-priv "both": SEQUENCE { OCTET STRING seed, OCTET STRING key }. */
+    /*
+     * The privateKey OCTET STRING content is the DER of the ML-DSA private-key
+     * CHOICE (draft-ietf-lamps-dilithium-certificates):
+     *   both        SEQUENCE { OCTET STRING seed(32), OCTET STRING expandedKey }
+     *   seed        [0] OCTET STRING (32)            (context tag 0x80)
+     *   expandedKey OCTET STRING (sk_len)            (0x04 wrapper)
+     * plus tolerated bare (unwrapped) seed / expandedKey.
+     */
+    {
         const unsigned char *q = pk;
-        long seqlen;
-        int tag, xclass;
-        ASN1_OCTET_STRING *o_seed = NULL, *o_priv = NULL;
+        long len;
+        int tag, xclass, hdr;
 
-        if ((ASN1_get_object(&q, &seqlen, &tag, &xclass, pklen) & 0x80)
-            || tag != V_ASN1_SEQUENCE)
-            goto both_fail;
-        o_seed = d2i_ASN1_OCTET_STRING(NULL, &q, (pk + pklen) - q);
-        o_priv = d2i_ASN1_OCTET_STRING(NULL, &q, (pk + pklen) - q);
-        if (o_seed != NULL && ASN1_STRING_length(o_seed) == MLDSA_SEED_LEN) {
-            memcpy(key->seed, ASN1_STRING_get0_data(o_seed), MLDSA_SEED_LEN);
-            key->has_seed = 1;
+        hdr = ASN1_get_object(&q, &len, &tag, &xclass, pklen);
+        if (!(hdr & 0x80)) {
+            if (xclass == V_ASN1_CONTEXT_SPECIFIC && tag == 0
+                && len == MLDSA_SEED_LEN) {
+                /* seed [0] */
+                memcpy(key->seed, q, MLDSA_SEED_LEN);
+                key->has_seed = 1;
+            } else if (xclass == V_ASN1_UNIVERSAL && tag == V_ASN1_SEQUENCE) {
+                /* both */
+                ASN1_OCTET_STRING *o_seed =
+                    d2i_ASN1_OCTET_STRING(NULL, &q, (pk + pklen) - q);
+                ASN1_OCTET_STRING *o_priv =
+                    d2i_ASN1_OCTET_STRING(NULL, &q, (pk + pklen) - q);
+
+                if (o_seed != NULL
+                    && ASN1_STRING_length(o_seed) == MLDSA_SEED_LEN) {
+                    memcpy(key->seed, ASN1_STRING_get0_data(o_seed),
+                           MLDSA_SEED_LEN);
+                    key->has_seed = 1;
+                }
+                if (o_priv != NULL
+                    && (size_t)ASN1_STRING_length(o_priv) == mp->sk_len
+                    && mldsa_key_alloc_priv(key)) {
+                    memcpy(key->priv, ASN1_STRING_get0_data(o_priv),
+                           mp->sk_len);
+                    key->has_priv = 1;
+                }
+                ASN1_OCTET_STRING_free(o_seed);
+                ASN1_OCTET_STRING_free(o_priv);
+            } else if (xclass == V_ASN1_UNIVERSAL
+                       && tag == V_ASN1_OCTET_STRING) {
+                /* expandedKey (or a seed) wrapped in an OCTET STRING */
+                if ((size_t)len == mp->sk_len && mldsa_key_alloc_priv(key)) {
+                    memcpy(key->priv, q, mp->sk_len);
+                    key->has_priv = 1;
+                } else if (len == MLDSA_SEED_LEN) {
+                    memcpy(key->seed, q, MLDSA_SEED_LEN);
+                    key->has_seed = 1;
+                }
+            }
         }
-        if (o_priv != NULL
-            && (size_t)ASN1_STRING_length(o_priv) == mp->sk_len) {
-            if (mldsa_key_alloc_priv(key)
-                && (memcpy(key->priv, ASN1_STRING_get0_data(o_priv),
-                           mp->sk_len), 1))
+        /* Bare (unwrapped) fallbacks. */
+        if (!key->has_seed && !key->has_priv) {
+            if ((size_t)pklen == MLDSA_SEED_LEN) {
+                memcpy(key->seed, pk, MLDSA_SEED_LEN);
+                key->has_seed = 1;
+            } else if ((size_t)pklen == mp->sk_len
+                       && mldsa_key_alloc_priv(key)) {
+                memcpy(key->priv, pk, mp->sk_len);
                 key->has_priv = 1;
-        }
- both_fail:
-        ASN1_OCTET_STRING_free(o_seed);
-        ASN1_OCTET_STRING_free(o_priv);
-    } else if ((size_t)pklen == MLDSA_SEED_LEN) {
-        memcpy(key->seed, pk, MLDSA_SEED_LEN);
-        key->has_seed = 1;
-    } else if ((size_t)pklen == mp->sk_len) {
-        if (mldsa_key_alloc_priv(key)) {
-            memcpy(key->priv, pk, mp->sk_len);
-            key->has_priv = 1;
+            }
         }
     }
 

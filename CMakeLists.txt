@@ -14,7 +14,10 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-find_package(OpenSSL 3.5 REQUIRED)
+# The provider itself only needs 3.0-era provider APIs; 3.2 is the tested floor
+# (matching oqs-provider). Interop against the *default* provider's ML-DSA needs
+# 3.5 and self-skips below that.
+find_package(OpenSSL 3.2 REQUIRED)
 
 # Where to load the provider .so from during tests, and the runtime lib path.
 get_filename_component(OPENSSL_LIB_DIR "${OPENSSL_CRYPTO_LIBRARY}" DIRECTORY)

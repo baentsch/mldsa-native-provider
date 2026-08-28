@@ -42,9 +42,41 @@ provider:
 - **Known-answer tests** — deterministic keygen and signing reproduce the
   FIPS 204 test vectors shipped with mldsa-native.
 
+## Cross-implementation interop (IETF pqc-certificates)
+
+The `ietf_interop` test consumes the ML-DSA artifacts published by many
+independent implementations at
+[IETF-Hackathon/pqc-certificates](https://github.com/IETF-Hackathon/pqc-certificates)
+and, using **only this provider** for the ML-DSA operations, checks that each
+implementation's self-signed trust-anchor certificate verifies and that every
+private-key form they ship (`seed` / `expandedKey` / `both`) loads and signs.
+It currently passes against **7 implementations** (bc, botan, carl-redhound,
+openjdk, ossl35, safelogic, sanctum-secops) across all three levels. It
+self-skips without network access or on OpenSSL &lt; 3.5 (X.509 ML-DSA handling
+is a 3.5 libcrypto feature).
+
+## OpenSSL version support
+
+| OpenSSL | provider builds | KAT | interop vs default | IETF cert interop |
+|---|:-:|:-:|:-:|:-:|
+| 3.2 – 3.4 | ✅ | ✅ | skipped¹ | skipped² |
+| 3.5+ | ✅ | ✅ | ✅ | ✅ |
+
+The provider itself only uses 3.0-era provider/EVP APIs, so it builds and its
+FIPS-204 KAT passes from **OpenSSL 3.2** on (a compat header supplies the few
+ML-DSA `OSSL_PARAM` name macros that were only added to the headers in 3.5).
+The things that genuinely need 3.5 are *comparisons/plumbing outside this
+provider*: ¹ the default provider gained ML-DSA in 3.5, so there is nothing to
+interop against before then; ² libcrypto's X.509 certificate machinery only
+understands ML-DSA from 3.5. Both tests self-skip below 3.5 rather than fail.
+
+CI (`.github/workflows/ci.yml`) builds against the `openssl-3.2` and
+`openssl-3.5` branches and runs the full test suite on each.
+
 ## Build
 
-Requires OpenSSL **3.5+** (ML-DSA landed in 3.5.0), CMake 3.16+, a C11 compiler.
+Requires CMake 3.16+, a C11 compiler, and OpenSSL **3.2+** (tested floor;
+**3.5+** for the default-provider and IETF cert interop).
 
 ```sh
 cmake -S . -B build -DOPENSSL_ROOT_DIR=/path/to/openssl-3.5
@@ -60,9 +92,11 @@ cd build
 ctest --output-on-failure
 ```
 
-- `kat`     — FIPS 204 known-answer tests through the provider (EVP API).
-- `interop` — parity / cross sign-verify / key-file round-trips against the
-  default provider.
+- `kat`          — FIPS 204 known-answer tests through the provider (EVP API).
+- `interop`      — parity / cross sign-verify / key-file round-trips against the
+  default provider (self-skips on OpenSSL &lt; 3.5).
+- `ietf_interop` — cross-implementation interop against the IETF
+  pqc-certificates artifacts (self-skips without network or on &lt; 3.5).
 
 To use the provider from the CLI, point `OPENSSL_MODULES` at the build
 directory:
@@ -82,8 +116,10 @@ mldsa_native_keymgmt.c      keymgmt: seed/pub/priv import-export, keygen, params
 mldsa_native_sig.c          signature: pure ML-DSA sign/verify (+ context, KAT entropy)
 mldsa_native_encoder.c      SPKI + PKCS8 encoders (DER + PEM)
 mldsa_native_decoder.c      SPKI + PKCS8 decoders (DER; PEM via OpenSSL pem2der)
+mldsa_native_compat.h       OSSL_PARAM name shims for OpenSSL 3.2-3.4 headers
 vendor/                     vendored mldsa-native (multi-level monolithic build)
-test/                       KAT + interop tests and FIPS 204 vectors
+test/                       KAT + interop tests, IETF interop script, FIPS 204 vectors
+.github/workflows/ci.yml    CI: build + test against openssl-3.2 and openssl-3.5
 ```
 
 ## Vendored code & license

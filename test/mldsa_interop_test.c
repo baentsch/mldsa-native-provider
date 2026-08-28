@@ -27,6 +27,8 @@
 #include <openssl/bio.h>
 #include <openssl/err.h>
 
+#include "mldsa_native_compat.h"
+
 #define OURS  "provider=mldsanative"
 #define DEFLT "provider=default"
 
@@ -298,6 +300,23 @@ int main(void)
         fprintf(stderr, "provider load failed\n");
         ERR_print_errors_fp(stderr);
         return 1;
+    }
+
+    /* Interop compares against the default provider's ML-DSA (OpenSSL 3.5+).
+     * On older OpenSSL the default provider has no ML-DSA: skip cleanly. */
+    {
+        uint8_t seed[32] = {0};
+        EVP_PKEY *probe = key_from_seed(libctx, "ML-DSA-44", DEFLT, seed);
+
+        if (probe == NULL) {
+            printf("SKIPPED: default provider has no ML-DSA "
+                   "(needs OpenSSL 3.5+); provider-only KAT still applies\n");
+            OSSL_PROVIDER_unload(mld);
+            OSSL_PROVIDER_unload(dflt);
+            OSSL_LIB_CTX_free(libctx);
+            return 0;
+        }
+        EVP_PKEY_free(probe);
     }
 
     printf("mldsa-native <-> default provider interop:\n");
