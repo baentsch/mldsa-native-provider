@@ -144,6 +144,17 @@ extern const OSSL_DISPATCH mldsa87_to_spki_pem_encoder_functions[];
 extern const OSSL_DISPATCH mldsa87_to_pki_der_encoder_functions[];
 extern const OSSL_DISPATCH mldsa87_to_pki_pem_encoder_functions[];
 
+/* Legacy-only encoders (OpenSSL < 3.5): encrypted PKCS8 + text. */
+extern const OSSL_DISPATCH mldsa44_to_epki_der_encoder_functions[];
+extern const OSSL_DISPATCH mldsa44_to_epki_pem_encoder_functions[];
+extern const OSSL_DISPATCH mldsa44_to_text_encoder_functions[];
+extern const OSSL_DISPATCH mldsa65_to_epki_der_encoder_functions[];
+extern const OSSL_DISPATCH mldsa65_to_epki_pem_encoder_functions[];
+extern const OSSL_DISPATCH mldsa65_to_text_encoder_functions[];
+extern const OSSL_DISPATCH mldsa87_to_epki_der_encoder_functions[];
+extern const OSSL_DISPATCH mldsa87_to_epki_pem_encoder_functions[];
+extern const OSSL_DISPATCH mldsa87_to_text_encoder_functions[];
+
 /* Decoders (mldsa_native_decoder.c). */
 extern const OSSL_DISPATCH mldsa44_spki_der_to_key_decoder_functions[];
 extern const OSSL_DISPATCH mldsa44_pki_der_to_key_decoder_functions[];

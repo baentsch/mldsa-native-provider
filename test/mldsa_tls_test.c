@@ -106,16 +106,30 @@ static int handshake(OSSL_LIB_CTX *ctx, const char *alg)
     for (i = 0; i < 20; i++) {
         int cs = SSL_do_handshake(c);
         int ss = SSL_do_handshake(s);
+
         if (SSL_is_init_finished(c) && SSL_is_init_finished(s)) {
             ret = 1;
             break;
         }
-        (void)cs; (void)ss;
+        if (ss <= 0) {
+            int e = SSL_get_error(s, ss);
+            if (e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE) {
+                fprintf(stderr, "%s: server error %d\n", alg, e);
+                ERR_print_errors_fp(stderr);
+                break;
+            }
+        }
+        if (cs <= 0) {
+            int e = SSL_get_error(c, cs);
+            if (e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE) {
+                fprintf(stderr, "%s: client error %d\n", alg, e);
+                ERR_print_errors_fp(stderr);
+                break;
+            }
+        }
     }
-    if (ret != 1) {
+    if (ret != 1)
         fprintf(stderr, "handshake did not finish for %s\n", alg);
-        ERR_print_errors_fp(stderr);
-    }
  end:
     SSL_free(s);
     SSL_free(c);
@@ -128,7 +142,6 @@ static int handshake(OSSL_LIB_CTX *ctx, const char *alg)
 
 int main(void)
 {
-    OSSL_LIB_CTX *ctx;
     const char *algs[] = { "ML-DSA-44", "ML-DSA-65", "ML-DSA-87" };
     int i, fails = 0, ran = 0;
 
@@ -136,12 +149,10 @@ int main(void)
         return skip("OpenSSL >= 3.5: ML-DSA TLS-SIGALG comes from the default "
                     "provider; this provider's capability is inactive there");
 
-    ctx = OSSL_LIB_CTX_new();
-    if (ctx == NULL)
-        return 1;
-    OSSL_PROVIDER_set_default_search_path(ctx, getenv("OPENSSL_MODULES"));
-    if (OSSL_PROVIDER_load(ctx, "default") == NULL
-        || OSSL_PROVIDER_load(ctx, "mldsanative") == NULL) {
+    /* Use the default library context (same path as `openssl` CLI). */
+    OSSL_PROVIDER_set_default_search_path(NULL, getenv("OPENSSL_MODULES"));
+    if (OSSL_PROVIDER_load(NULL, "default") == NULL
+        || OSSL_PROVIDER_load(NULL, "mldsanative") == NULL) {
         fprintf(stderr, "provider load failed\n");
         ERR_print_errors_fp(stderr);
         return 1;
@@ -149,15 +160,12 @@ int main(void)
 
     printf("ML-DSA TLS 1.3 handshake via mldsanative TLS-SIGALG capability:\n");
     for (i = 0; i < 3; i++) {
-        int r = handshake(ctx, algs[i]);
-        if (r == -1) {
-            OSSL_LIB_CTX_free(ctx);
+        int r = handshake(NULL, algs[i]);
+        if (r == -1)
             return skip("libssl cannot initialise SSL_CTX in this environment");
-        }
         if (r == 1) { printf("  ok  %s TLS handshake\n", algs[i]); ran++; }
         else { printf("  FAIL %s\n", algs[i]); fails++; }
     }
-    OSSL_LIB_CTX_free(ctx);
     if (fails == 0 && ran > 0) { printf("ALL TLS HANDSHAKES PASSED\n"); return 0; }
     return fails ? 1 : skip("no handshakes ran");
 }

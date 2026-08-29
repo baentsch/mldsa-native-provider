@@ -15,13 +15,17 @@
 #include <openssl/crypto.h>
 #include <openssl/bio.h>
 #include <openssl/pem.h>
+#include <openssl/evp.h>
 #include <openssl/x509.h>
 #include <openssl/asn1.h>
+#include <openssl/pkcs12.h>   /* PKCS8_encrypt_ex */
 
 #include "mldsa_native_prov.h"
 
 typedef struct {
     OSSL_LIB_CTX *libctx;
+    EVP_CIPHER *cipher;   /* set => encrypt PKCS#8 (legacy encoders only) */
+    char *propq;
 } MLDSA_ENC_CTX;
 
 static void *mldsa_enc_newctx(void *provctx)
@@ -35,7 +39,56 @@ static void *mldsa_enc_newctx(void *provctx)
 
 static void mldsa_enc_freectx(void *vctx)
 {
-    OPENSSL_free(vctx);
+    MLDSA_ENC_CTX *ctx = vctx;
+
+    if (ctx == NULL)
+        return;
+    EVP_CIPHER_free(ctx->cipher);
+    OPENSSL_free(ctx->propq);
+    OPENSSL_free(ctx);
+}
+
+/* Accept a cipher (for EncryptedPrivateKeyInfo) + properties. */
+static const OSSL_PARAM *mldsa_enc_settable_ctx_params(void *provctx)
+{
+    static const OSSL_PARAM settable[] = {
+        OSSL_PARAM_utf8_string(OSSL_ENCODER_PARAM_CIPHER, NULL, 0),
+        OSSL_PARAM_utf8_string(OSSL_ENCODER_PARAM_PROPERTIES, NULL, 0),
+        OSSL_PARAM_END
+    };
+    (void)provctx;
+    return settable;
+}
+
+static int mldsa_enc_set_ctx_params(void *vctx, const OSSL_PARAM params[])
+{
+    MLDSA_ENC_CTX *ctx = vctx;
+    const OSSL_PARAM *p;
+    const char *ciphername = NULL, *props = NULL;
+
+    if (ctx == NULL)
+        return 0;
+    p = OSSL_PARAM_locate_const(params, OSSL_ENCODER_PARAM_PROPERTIES);
+    if (p != NULL) {
+        if (!OSSL_PARAM_get_utf8_string_ptr(p, &props))
+            return 0;
+        OPENSSL_free(ctx->propq);
+        ctx->propq = props != NULL ? OPENSSL_strdup(props) : NULL;
+    }
+    p = OSSL_PARAM_locate_const(params, OSSL_ENCODER_PARAM_CIPHER);
+    if (p != NULL) {
+        if (!OSSL_PARAM_get_utf8_string_ptr(p, &ciphername))
+            return 0;
+        EVP_CIPHER_free(ctx->cipher);
+        ctx->cipher = NULL;
+        if (ciphername != NULL)
+            ctx->cipher = EVP_CIPHER_fetch(ctx->libctx, ciphername, ctx->propq);
+        /* A cipher was requested but could not be fetched: refuse rather than
+         * silently emitting an unencrypted key. */
+        if (ciphername != NULL && ctx->cipher == NULL)
+            return 0;
+    }
+    return 1;
 }
 
 /* Build SubjectPublicKeyInfo DER for key. Returns len, *der malloc'd. */
@@ -111,34 +164,45 @@ static int mldsa_encode_both_seq(const uint8_t *a, size_t alen,
     return total;
 }
 
-/* Build PKCS#8 PrivateKeyInfo DER (seed-priv "both" form). */
-static int mldsa_encode_pki(const MLDSA_KEY *key, unsigned char **der)
+/* Build the PKCS#8 PrivateKeyInfo object (seed-priv "both" form). */
+static PKCS8_PRIV_KEY_INFO *mldsa_key_to_p8(const MLDSA_KEY *key)
 {
     PKCS8_PRIV_KEY_INFO *p8;
     ASN1_OBJECT *obj;
     unsigned char *inner = NULL;
-    int innerlen, derlen = -1;
+    int innerlen;
 
     if (!key->has_priv || !key->has_seed)
-        return -1;
+        return NULL;
     innerlen = mldsa_encode_both_seq(key->seed, MLDSA_SEED_LEN,
                                      key->priv, key->params->sk_len, &inner);
     if (innerlen <= 0)
-        return -1;
+        return NULL;
     obj = OBJ_txt2obj(key->params->oid, 1);
     p8 = PKCS8_PRIV_KEY_INFO_new();
     if (obj == NULL || p8 == NULL) {
         ASN1_OBJECT_free(obj);
         PKCS8_PRIV_KEY_INFO_free(p8);
         OPENSSL_free(inner);
-        return -1;
+        return NULL;
     }
     /* Takes ownership of obj and inner. */
     if (!PKCS8_pkey_set0(p8, obj, 0, V_ASN1_UNDEF, NULL, inner, innerlen)) {
         PKCS8_PRIV_KEY_INFO_free(p8);
         OPENSSL_free(inner);
-        return -1;
+        return NULL;
     }
+    return p8;
+}
+
+/* Build PKCS#8 PrivateKeyInfo DER (seed-priv "both" form). */
+static int mldsa_encode_pki(const MLDSA_KEY *key, unsigned char **der)
+{
+    PKCS8_PRIV_KEY_INFO *p8 = mldsa_key_to_p8(key);
+    int derlen;
+
+    if (p8 == NULL)
+        return -1;
     derlen = i2d_PKCS8_PRIV_KEY_INFO(p8, der);
     PKCS8_PRIV_KEY_INFO_free(p8);
     return derlen;
@@ -228,3 +292,154 @@ MAKE_ENCODE_FN(pki_pem, 1, 1)
 MAKE_ENCODERS(44);
 MAKE_ENCODERS(65);
 MAKE_ENCODERS(87);
+
+/* ------------------------------------------------------------------ */
+/* Legacy-only encoders (OpenSSL < 3.5): encrypted PKCS#8 + text.      */
+/* On 3.5+ the default provider supplies these for ML-DSA keys.        */
+/* ------------------------------------------------------------------ */
+
+/* PKCS#8 encoder that honours a cipher set via OSSL_ENCODER_PARAM_CIPHER:
+ * with a cipher it emits EncryptedPrivateKeyInfo, otherwise plain PKCS#8. */
+static int mldsa_encode_pki_maybe_enc(MLDSA_ENC_CTX *ctx, OSSL_CORE_BIO *cout,
+                                      const MLDSA_KEY *key, int is_pem,
+                                      OSSL_PASSPHRASE_CALLBACK *cb, void *cbarg)
+{
+    PKCS8_PRIV_KEY_INFO *p8 = NULL;
+    X509_SIG *enc = NULL;
+    BIO *out = NULL;
+    unsigned char *der = NULL;
+    char pass[1024];
+    size_t passlen = 0;
+    int derlen = -1, ret = 0;
+
+    if (key == NULL)
+        return 0;
+    if (ctx->cipher == NULL)               /* no encryption requested */
+        return mldsa_do_encode(ctx, cout, key, 1, is_pem);
+
+    if (cb == NULL
+        || !cb(pass, sizeof(pass), &passlen, NULL, cbarg)) {
+        ERR_raise(ERR_LIB_PROV, ERR_R_PASSED_INVALID_ARGUMENT);
+        return 0;
+    }
+    p8 = mldsa_key_to_p8(key);
+    if (p8 == NULL)
+        goto end;
+    enc = PKCS8_encrypt_ex(-1, ctx->cipher, pass, (int)passlen, NULL, 0, 0,
+                           p8, ctx->libctx, ctx->propq);
+    if (enc == NULL)
+        goto end;
+    derlen = i2d_X509_SIG(enc, &der);
+    if (derlen <= 0)
+        goto end;
+    out = BIO_new_from_core_bio(ctx->libctx, cout);
+    if (out == NULL)
+        goto end;
+    if (is_pem)
+        ret = PEM_write_bio(out, "ENCRYPTED PRIVATE KEY", "", der,
+                            (long)derlen) > 0;
+    else
+        ret = BIO_write(out, der, derlen) == derlen;
+ end:
+    OPENSSL_cleanse(pass, sizeof(pass));
+    OPENSSL_free(der);
+    BIO_free(out);
+    X509_SIG_free(enc);
+    PKCS8_PRIV_KEY_INFO_free(p8);
+    return ret;
+}
+
+static int mldsa_encode_epki_der(void *vctx, OSSL_CORE_BIO *cout,
+                                 const void *key, const OSSL_PARAM abstract[],
+                                 int selection, OSSL_PASSPHRASE_CALLBACK *cb,
+                                 void *cbarg)
+{
+    (void)selection;
+    if (abstract != NULL)
+        return 0;
+    return mldsa_encode_pki_maybe_enc((MLDSA_ENC_CTX *)vctx, cout,
+                                      (const MLDSA_KEY *)key, 0, cb, cbarg);
+}
+
+static int mldsa_encode_epki_pem(void *vctx, OSSL_CORE_BIO *cout,
+                                 const void *key, const OSSL_PARAM abstract[],
+                                 int selection, OSSL_PASSPHRASE_CALLBACK *cb,
+                                 void *cbarg)
+{
+    (void)selection;
+    if (abstract != NULL)
+        return 0;
+    return mldsa_encode_pki_maybe_enc((MLDSA_ENC_CTX *)vctx, cout,
+                                      (const MLDSA_KEY *)key, 1, cb, cbarg);
+}
+
+/* Human-readable text dump (openssl pkey -text). */
+static void mldsa_bio_hex(BIO *out, const char *label, const unsigned char *b,
+                          size_t n)
+{
+    size_t i;
+
+    BIO_printf(out, "%s (%zu bytes):\n", label, n);
+    for (i = 0; i < n; i++)
+        BIO_printf(out, "%02x%s", b[i],
+                   ((i + 1) % 16 == 0 || i + 1 == n) ? "\n" : ":");
+}
+
+static int mldsa_encode_text(void *vctx, OSSL_CORE_BIO *cout, const void *vkey,
+                             const OSSL_PARAM abstract[], int selection,
+                             OSSL_PASSPHRASE_CALLBACK *cb, void *cbarg)
+{
+    MLDSA_ENC_CTX *ctx = vctx;
+    const MLDSA_KEY *key = vkey;
+    BIO *out;
+    int priv = (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) != 0
+               && key != NULL && key->has_priv;
+
+    (void)cb;
+    (void)cbarg;
+    if (abstract != NULL || key == NULL)
+        return 0;
+    out = BIO_new_from_core_bio(ctx->libctx, cout);
+    if (out == NULL)
+        return 0;
+    BIO_printf(out, "%s %s-Key:\n", key->params->name,
+               priv ? "Private" : "Public");
+    if (priv && key->has_seed)
+        mldsa_bio_hex(out, "seed", key->seed, MLDSA_SEED_LEN);
+    if (priv)
+        mldsa_bio_hex(out, "priv", key->priv, key->params->sk_len);
+    if (key->has_pub)
+        mldsa_bio_hex(out, "pub", key->pub, key->params->pk_len);
+    BIO_free(out);
+    return 1;
+}
+
+static int mldsa_enc_text_does_selection(void *ctx, int selection)
+{
+    (void)ctx;
+    return (selection & OSSL_KEYMGMT_SELECT_KEYPAIR) != 0;
+}
+
+/* Dispatch macro for the cipher-aware PKCS#8 (adds set/settable ctx params). */
+#define ENC_TABLE_ENC(DOES, ENCFN)                                            \
+    { OSSL_FUNC_ENCODER_NEWCTX, (void (*)(void))mldsa_enc_newctx },            \
+    { OSSL_FUNC_ENCODER_FREECTX, (void (*)(void))mldsa_enc_freectx },          \
+    { OSSL_FUNC_ENCODER_SETTABLE_CTX_PARAMS,                                   \
+      (void (*)(void))mldsa_enc_settable_ctx_params },                         \
+    { OSSL_FUNC_ENCODER_SET_CTX_PARAMS,                                        \
+      (void (*)(void))mldsa_enc_set_ctx_params },                             \
+    { OSSL_FUNC_ENCODER_DOES_SELECTION, (void (*)(void))DOES },                \
+    { OSSL_FUNC_ENCODER_ENCODE, (void (*)(void))ENCFN },                       \
+    { 0, NULL }
+
+#define MAKE_LEGACY_ENCODERS(LVL)                                             \
+    const OSSL_DISPATCH mldsa##LVL##_to_epki_der_encoder_functions[] = {       \
+        ENC_TABLE_ENC(mldsa_enc_pki_does_selection, mldsa_encode_epki_der) };  \
+    const OSSL_DISPATCH mldsa##LVL##_to_epki_pem_encoder_functions[] = {       \
+        ENC_TABLE_ENC(mldsa_enc_pki_does_selection, mldsa_encode_epki_pem) };  \
+    const OSSL_DISPATCH mldsa##LVL##_to_text_encoder_functions[] = {           \
+        ENC_TABLE(0, mldsa_enc_text_does_selection, mldsa_encode_text) }
+
+MAKE_LEGACY_ENCODERS(44);
+MAKE_LEGACY_ENCODERS(65);
+MAKE_LEGACY_ENCODERS(87);

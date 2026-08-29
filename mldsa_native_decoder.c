@@ -30,15 +30,28 @@ static void mldsa_dec_freectx(void *vctx)
     OPENSSL_free(vctx);
 }
 
-static int mldsa_dec_does_selection(void *vctx, int selection)
+/*
+ * OSSL_FUNC_decoder_does_selection is called with the *provider* context, not a
+ * per-decoder instance context (see collect_decoder() in
+ * crypto/encode_decode/decoder_pkey.c). It therefore cannot consult ctx->is_priv
+ * to tell the SPKI decoder from the PKCS#8 one -- each structure needs its own
+ * function reporting the fixed selection it can produce. Getting this wrong
+ * makes the decoder framework silently skip our decoders (no key ever loads).
+ */
+static int mldsa_dec_does_selection_pub(void *provctx, int selection)
 {
-    MLDSA_DEC_CTX *ctx = vctx;
-
+    (void)provctx;
     if (selection == 0)
         return 1;
-    if (ctx->is_priv)
-        return (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) != 0;
     return (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) != 0;
+}
+
+static int mldsa_dec_does_selection_priv(void *provctx, int selection)
+{
+    (void)provctx;
+    if (selection == 0)
+        return 1;
+    return (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) != 0;
 }
 
 /* Read the entire core BIO into a malloc'd buffer. */
@@ -89,28 +102,58 @@ static int oid_matches(const ASN1_OBJECT *obj, const MLDSA_PARAMS *mp)
     return strcmp(buf, mp->oid) == 0;
 }
 
+/*
+ * Parse the SubjectPublicKeyInfo by hand rather than via d2i_X509_PUBKEY.
+ *
+ * On OpenSSL 3.x the X509_PUBKEY ASN.1 template carries an "ex" d2i callback
+ * (x509_pubkey_ex_d2i_ex) that eagerly runs the OSSL_DECODER machinery to build
+ * an EVP_PKEY. Calling d2i_X509_PUBKEY from inside our own decoder would re-enter
+ * that machinery for the same keytype+structure, invoking this decoder again and
+ * recursing without bound (stack overflow). Manual parsing avoids the re-entry.
+ *
+ *   SubjectPublicKeyInfo ::= SEQUENCE {
+ *       algorithm         SEQUENCE { OBJECT IDENTIFIER, ... },
+ *       subjectPublicKey  BIT STRING }   -- 0 unused bits, then the raw key
+ */
 static MLDSA_KEY *decode_spki(MLDSA_DEC_CTX *ctx, const unsigned char *der,
                               long derlen)
 {
-    const unsigned char *p = der;
-    X509_PUBKEY *xpk;
+    const unsigned char *p = der, *end = der + derlen, *alg_end;
     ASN1_OBJECT *obj = NULL;
-    const unsigned char *pk = NULL;
-    int pklen = 0;
-    X509_ALGOR *palg = NULL;
     MLDSA_KEY *key = NULL;
+    long len;
+    int tag, xclass, hdr;
 
-    xpk = d2i_X509_PUBKEY(NULL, &p, derlen);
-    if (xpk == NULL)
+    /* outer SEQUENCE */
+    hdr = ASN1_get_object(&p, &len, &tag, &xclass, end - p);
+    if ((hdr & 0x80) || tag != V_ASN1_SEQUENCE || xclass != V_ASN1_UNIVERSAL)
         return NULL;
-    if (!X509_PUBKEY_get0_param(&obj, &pk, &pklen, &palg, xpk))
+    end = p + len;                       /* confine to the SPKI contents */
+
+    /* algorithm SEQUENCE */
+    hdr = ASN1_get_object(&p, &len, &tag, &xclass, end - p);
+    if ((hdr & 0x80) || tag != V_ASN1_SEQUENCE || xclass != V_ASN1_UNIVERSAL)
+        return NULL;
+    alg_end = p + len;
+    obj = d2i_ASN1_OBJECT(NULL, &p, alg_end - p);
+    if (obj == NULL)
+        return NULL;
+    p = alg_end;                         /* skip any AlgorithmIdentifier params */
+
+    /* subjectPublicKey BIT STRING */
+    hdr = ASN1_get_object(&p, &len, &tag, &xclass, end - p);
+    if ((hdr & 0x80) || tag != V_ASN1_BIT_STRING || xclass != V_ASN1_UNIVERSAL
+        || len < 1 || *p != 0x00)        /* first octet = unused-bit count = 0 */
         goto end;
-    if (!oid_matches(obj, ctx->params) || (size_t)pklen != ctx->params->pk_len)
+    p++;
+    len--;
+
+    if (!oid_matches(obj, ctx->params) || (size_t)len != ctx->params->pk_len)
         goto end;
     key = mldsa_key_new(ctx->libctx, NULL, ctx->params);
     if (key == NULL)
         goto end;
-    key->pub = OPENSSL_memdup(pk, (size_t)pklen);
+    key->pub = OPENSSL_memdup(p, (size_t)len);
     if (key->pub == NULL) {
         mldsa_key_free(key);
         key = NULL;
@@ -118,7 +161,7 @@ static MLDSA_KEY *decode_spki(MLDSA_DEC_CTX *ctx, const unsigned char *der,
     }
     key->has_pub = 1;
  end:
-    X509_PUBKEY_free(xpk);
+    ASN1_OBJECT_free(obj);
     return key;
 }
 
@@ -303,7 +346,7 @@ static int mldsa_dec_decode(void *vctx, OSSL_CORE_BIO *cin, int selection,
           (void (*)(void))mldsa##LVL##_spki_dec_newctx },                    \
         { OSSL_FUNC_DECODER_FREECTX, (void (*)(void))mldsa_dec_freectx },     \
         { OSSL_FUNC_DECODER_DOES_SELECTION,                                   \
-          (void (*)(void))mldsa_dec_does_selection },                        \
+          (void (*)(void))mldsa_dec_does_selection_pub },                    \
         { OSSL_FUNC_DECODER_DECODE, (void (*)(void))mldsa_dec_decode },       \
         { 0, NULL }                                                          \
     };                                                                       \
@@ -312,7 +355,7 @@ static int mldsa_dec_decode(void *vctx, OSSL_CORE_BIO *cin, int selection,
           (void (*)(void))mldsa##LVL##_pki_dec_newctx },                     \
         { OSSL_FUNC_DECODER_FREECTX, (void (*)(void))mldsa_dec_freectx },     \
         { OSSL_FUNC_DECODER_DOES_SELECTION,                                   \
-          (void (*)(void))mldsa_dec_does_selection },                        \
+          (void (*)(void))mldsa_dec_does_selection_priv },                        \
         { OSSL_FUNC_DECODER_DECODE, (void (*)(void))mldsa_dec_decode },       \
         { 0, NULL }                                                          \
     }

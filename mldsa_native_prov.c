@@ -11,6 +11,7 @@
 #include <strings.h>
 
 #include <openssl/provider.h>
+#include <openssl/objects.h>
 #include <openssl/rand.h>
 
 #include "mldsa_native_prov.h"
@@ -157,6 +158,31 @@ static const OSSL_ALGORITHM mldsa_encoder[] = {
     { NULL, NULL, NULL, NULL }
 };
 
+/*
+ * Legacy encoder set (OpenSSL < 3.5): same SPKI encoders, but the PrivateKeyInfo
+ * encoders are cipher-aware (EncryptedPrivateKeyInfo when a cipher is set), plus
+ * text output. On 3.5+ the default provider supplies these for ML-DSA keys.
+ */
+#define ENC_LEGACY_ROWS(LVL, NAME)                                             \
+    { NAME, MLDSANATIVE_PROPS ",output=der,structure=SubjectPublicKeyInfo",    \
+      mldsa##LVL##_to_spki_der_encoder_functions, NAME " SPKI DER encoder" },  \
+    { NAME, MLDSANATIVE_PROPS ",output=pem,structure=SubjectPublicKeyInfo",    \
+      mldsa##LVL##_to_spki_pem_encoder_functions, NAME " SPKI PEM encoder" },  \
+    { NAME, MLDSANATIVE_PROPS ",output=der,structure=PrivateKeyInfo",          \
+      mldsa##LVL##_to_epki_der_encoder_functions, NAME " PKCS8 DER encoder" }, \
+    { NAME, MLDSANATIVE_PROPS ",output=pem,structure=PrivateKeyInfo",          \
+      mldsa##LVL##_to_epki_pem_encoder_functions, NAME " PKCS8 PEM encoder" }, \
+    { NAME, MLDSANATIVE_PROPS ",output=text",                                  \
+      mldsa##LVL##_to_text_encoder_functions, NAME " text encoder" }
+
+static const OSSL_ALGORITHM mldsa_encoder_legacy[] = {
+    ENC_LEGACY_ROWS(44, "ML-DSA-44"),
+    ENC_LEGACY_ROWS(65, "ML-DSA-65"),
+    ENC_LEGACY_ROWS(87, "ML-DSA-87"),
+    { NULL, NULL, NULL, NULL }
+};
+
+/* Decoders: input format + structure selected via the properties string. */
 static const OSSL_ALGORITHM mldsa_decoder[] = {
     { "ML-DSA-44", MLDSANATIVE_PROPS ",input=der,structure=SubjectPublicKeyInfo",
       mldsa44_spki_der_to_key_decoder_functions, "ML-DSA-44 SPKI DER decoder" },
@@ -215,7 +241,8 @@ static int mldsa_get_params(void *provctx, OSSL_PARAM params[])
 static const OSSL_ALGORITHM *mldsa_query(void *provctx, int operation_id,
                                          int *no_cache)
 {
-    (void)provctx;
+    PROV_MLDSA_CTX *ctx = provctx;
+
     *no_cache = 0;
     switch (operation_id) {
     case OSSL_OP_KEYMGMT:
@@ -223,7 +250,10 @@ static const OSSL_ALGORITHM *mldsa_query(void *provctx, int operation_id,
     case OSSL_OP_SIGNATURE:
         return mldsa_signature;
     case OSSL_OP_ENCODER:
-        return mldsa_encoder;
+        /* Add the encrypted-PKCS8 and text encoders only where the default
+         * provider does not already supply them (OpenSSL < 3.5). */
+        return (ctx != NULL && ctx->legacy) ? mldsa_encoder_legacy
+                                            : mldsa_encoder;
     case OSSL_OP_DECODER:
         return mldsa_decoder;
     default:
@@ -241,17 +271,24 @@ static const OSSL_ALGORITHM *mldsa_query(void *provctx, int operation_id,
  * provider advertises these; we only do so when it is absent.
  */
 typedef struct {
-    const char *iana_name;   /* TLS sigalg name, e.g. "mldsa44" */
+    const char *iana_name;   /* TLS sigalg name == keytype == OID name */
     const char *oid;
     const char *keytype;     /* our keymgmt name, e.g. "ML-DSA-44" */
     unsigned int code_point;
     unsigned int sec_bits;
 } MLDSA_TLS_SIGALG;
 
+/*
+ * The TLS sigalg name is kept identical to the keytype / OID name ("ML-DSA-44")
+ * on purpose: libssl derives the certificate keytype from the OID's registered
+ * name and must fetch the same-named keymgmt/decoder, and add_provider_sigalgs
+ * looks the sigalg up by this name. The wire identity is the code point
+ * (0x0904/5/6), which matches other implementations regardless of local name.
+ */
 static const MLDSA_TLS_SIGALG mldsa_tls_sigalgs[] = {
-    { "mldsa44", "2.16.840.1.101.3.4.3.17", "ML-DSA-44", 0x0904, 128 },
-    { "mldsa65", "2.16.840.1.101.3.4.3.18", "ML-DSA-65", 0x0905, 192 },
-    { "mldsa87", "2.16.840.1.101.3.4.3.19", "ML-DSA-87", 0x0906, 256 },
+    { "ML-DSA-44", "2.16.840.1.101.3.4.3.17", "ML-DSA-44", 0x0904, 128 },
+    { "ML-DSA-65", "2.16.840.1.101.3.4.3.18", "ML-DSA-65", 0x0905, 192 },
+    { "ML-DSA-87", "2.16.840.1.101.3.4.3.19", "ML-DSA-87", 0x0906, 256 },
 };
 static const int mldsa_tls_min = 0x0304;   /* TLS 1.3 only */
 static const int mldsa_tls_max = 0;
@@ -298,7 +335,12 @@ static int mldsa_get_capabilities(void *provctx, const char *capability,
     if (ctx != NULL && ctx->legacy
         && strcasecmp(capability, "TLS-SIGALG") == 0)
         return mldsa_sigalg_capability(cb, arg);
-    return 0;
+    /*
+     * For every other capability (e.g. "TLS-GROUP") we simply have nothing to
+     * add. Return success -- returning 0 here signals an error and aborts
+     * SSL_CTX creation for the whole process.
+     */
+    return 1;
 }
 
 static void mldsa_teardown(void *provctx)
@@ -378,14 +420,28 @@ int OSSL_provider_init(const OSSL_CORE_HANDLE *handle, const OSSL_DISPATCH *in,
      * the default provider already does this -- stay out of the way.
      */
     if (ctx->legacy && c_obj_create != NULL && c_obj_add_sigid != NULL) {
-        const MLDSA_PARAMS *lv[3] = {
-            &mldsa_params_44, &mldsa_params_65, &mldsa_params_87
-        };
         size_t i;
 
-        for (i = 0; i < 3; i++) {
-            (void)c_obj_create(handle, lv[i]->oid, lv[i]->name, lv[i]->name);
-            (void)c_obj_add_sigid(handle, lv[i]->name, "", lv[i]->name);
+        for (i = 0; i < sizeof(mldsa_tls_sigalgs) / sizeof(mldsa_tls_sigalgs[0]);
+             i++) {
+            const MLDSA_TLS_SIGALG *s = &mldsa_tls_sigalgs[i];
+            ASN1_OBJECT *o = OBJ_txt2obj(s->oid, 1);
+            int known = (o != NULL) && (OBJ_obj2nid(o) != NID_undef);
+
+            ASN1_OBJECT_free(o);
+            /*
+             * Only register if this OID is not already known -- avoids clashing
+             * with a core/provider that already registered it (idempotent, and
+             * belt-and-suspenders alongside the < 3.5 version gate above).
+             * Register the OID with short name = the TLS sigalg name
+             * ("mldsa44") and long name = the keytype ("ML-DSA-44"), so both
+             * resolve to the same NID: libssl's add_provider_sigalgs looks the
+             * sigalg up by its (short) name; X.509/keymgmt use the keytype.
+             */
+            if (!known) {
+                (void)c_obj_create(handle, s->oid, s->iana_name, s->keytype);
+                (void)c_obj_add_sigid(handle, s->iana_name, "", s->iana_name);
+            }
         }
     }
 
