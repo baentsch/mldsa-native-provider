@@ -40,8 +40,8 @@ The three providers occupy deliberately different points in the design space:
 
 Structurally that makes this the *flat, single-purpose* member of the family:
 no algorithm registry, no external crypto library, no runtime composition, no
-OID patching — the provider is a thin, direct binding over one focused,
-formally-verified implementation.
+OID patching — the provider is a thin, direct binding over one focused
+implementation.
 
 ### Code size
 
@@ -54,9 +54,9 @@ Measured with `wc -l` over C/H (and asm) sources in each repository:
 | External crypto dependency | none | **liboqs ~174k** | other providers (varies) |
 | Tests | ~0.5k C + 0.3k shell (+4.1k KAT data) | — | — |
 
-¹ mldsa-native covers all three ML-DSA levels with a portable-C core (~11.5k)
-plus optional x86_64/AArch64 backends (~4k C + 0.8k asm), and is
-[formally verified with CBMC](https://github.com/pq-code-package/mldsa-native).
+¹ [mldsa-native](https://github.com/pq-code-package/mldsa-native) covers all
+three ML-DSA levels with a portable-C core (~11.5k) plus optional x86_64/AArch64
+backends (~4k C + 0.8k asm).
 
 ### Does less code mean less vulnerability potential?
 
@@ -74,20 +74,21 @@ Partly, and it is a fair argument — with caveats worth stating honestly:
   (many algorithms, hybrids, composites). Most of this provider's smallness is
   scope, not superior engineering.
 - **The crypto still exists and still counts.** We vendor ~18k lines of
-  mldsa-native — it is simply single-purpose. What actually strengthens the
-  security story there is not the line count but that mldsa-native is
-  **formally verified (CBMC) and constant-time-checked**; that is a stronger
-  signal than raw LOC.
+  mldsa-native — it is simply single-purpose. Whatever assurance properties that
+  upstream code has are the upstream's; they are **not** claims about this
+  provider's overall code path. The provider's own glue (keymgmt, signature,
+  encoders/decoders, parameter handling) is ordinary C and carries no such
+  guarantees, so it must be judged on its own merits.
 - **Vendoring shifts, not removes, responsibility.** Pinning a copy of
   mldsa-native means tracking upstream fixes ourselves (a supply-chain duty),
   whereas a shared `liboqs` is patched in one place.
-- **LOC is a weak proxy.** Complexity, memory safety, and test/verification
-  coverage predict vulnerabilities far better than line count.
+- **LOC is a weak proxy.** Complexity, memory safety, and test coverage predict
+  vulnerabilities far better than line count.
 
 Bottom line: the smaller, dependency-light, single-purpose design does reduce
-attack surface and audit burden — but the durable security benefits come from
-**no intermediate layers, no extra runtime dependencies, and a formally-verified
-core**, more than from the line count itself.
+attack surface and audit burden — but the durable benefits come from **no
+intermediate layers, no extra runtime dependencies, and a small single-purpose
+surface**, more than from the line count itself.
 
 ## Interoperability with the OpenSSL default provider
 
