@@ -53,16 +53,10 @@ command -v unzip >/dev/null 2>&1 || skip "unzip not available"
 "$OPENSSL" list -providers -provider mldsanative >/dev/null 2>&1 \
     || skip "mldsanative provider not loadable (OPENSSL_MODULES=$OPENSSL_MODULES)"
 
-# Our provider supplies the ML-DSA crypto, but reading/verifying ML-DSA X.509
-# certificates relies on libcrypto's own certificate machinery, which only
-# understands ML-DSA from OpenSSL 3.5. Skip on older cores.
-ver="$("$OPENSSL" version 2>/dev/null | awk '{print $2}')"
-vmaj="${ver%%.*}"; vrest="${ver#*.}"; vmin="${vrest%%.*}"
-case "$vmaj" in ''|*[!0-9]*) vmaj=0 ;; esac
-case "$vmin" in ''|*[!0-9]*) vmin=0 ;; esac
-if [ "$vmaj" -lt 3 ] || { [ "$vmaj" -eq 3 ] && [ "$vmin" -lt 5 ]; }; then
-    skip "IETF X.509 ML-DSA interop needs OpenSSL 3.5+ (have ${ver:-unknown})"
-fi
+# This provider supplies the ML-DSA X.509 machinery (OID/sigid registration plus
+# SPKI/PKCS#8 codecs) on OpenSSL < 3.5, where libcrypto has no native ML-DSA, so
+# the interop runs across the whole 3.2+ range -- no version gate needed. Every
+# openssl invocation below passes ${PROV[@]} so the provider is available.
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -88,10 +82,14 @@ pass=0; fail=0; providers_seen=0
 # Verify a self-signed TA cert with our provider; echo its pubkey PEM path.
 verify_cert() {   # $1 = ta.der
     local ta="$1" pem="$1.pem" pub="$1.pub.pem"
-    "$OPENSSL" x509 -inform DER -in "$ta" -out "$pem" 2>/dev/null || return 1
+    # Every step needs ${PROV[@]}: below OpenSSL 3.5 libcrypto has no native
+    # ML-DSA, so decoding the certificate's public key relies on this provider.
+    "$OPENSSL" x509 "${PROV[@]}" -inform DER -in "$ta" -out "$pem" \
+        2>/dev/null || return 1
     "$OPENSSL" verify "${PROV[@]}" -check_ss_sig -CAfile "$pem" "$pem" \
         >/dev/null 2>&1 || return 1
-    "$OPENSSL" x509 -in "$pem" -pubkey -noout -out "$pub" 2>/dev/null || return 1
+    "$OPENSSL" x509 "${PROV[@]}" -in "$pem" -pubkey -noout -out "$pub" \
+        2>/dev/null || return 1
     echo "$pub"
 }
 
