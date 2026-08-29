@@ -5,34 +5,38 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Demonstrate the version story:
+# Demonstrate the version story AND the platform story:
 #   * openssl-3.2 : the provider builds and its FIPS-204 KAT passes; the
 #                   default-provider interop and IETF X.509 interop self-skip
 #                   (the default provider / libcrypto have no ML-DSA before 3.5).
-#   * openssl-3.5 : everything runs, including cross-provider interop and the
-#                   IETF pqc-certificates cross-implementation interop.
+#   * openssl-3.5 : everything runs, including cross-provider interop, the IETF
+#                   pqc-certificates interop, and an informational benchmark.
+#   * x86_64 and aarch64 runners each exercise mldsa-native's CPU-optimized
+#     native backend (AVX2 / AArch64 asm); the 3.5 benchmark reports the numbers.
 jobs:
   build-test:
-    name: openssl ${{ matrix.ossl-branch }}
-    runs-on: ubuntu-latest
+    name: ${{ matrix.arch }} / ${{ matrix.ossl-branch }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - ossl-branch: openssl-3.2
-          - ossl-branch: openssl-3.5
+          - { runner: ubuntu-latest,    arch: x86_64,  ossl-branch: openssl-3.2 }
+          - { runner: ubuntu-latest,    arch: x86_64,  ossl-branch: openssl-3.5 }
+          - { runner: ubuntu-24.04-arm, arch: aarch64, ossl-branch: openssl-3.2 }
+          - { runner: ubuntu-24.04-arm, arch: aarch64, ossl-branch: openssl-3.5 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y build-essential cmake unzip
 
       - name: Cache OpenSSL build
         id: cache-ossl
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ github.workspace }}/ossl
-          key: ossl-${{ matrix.ossl-branch }}-v1
+          key: ossl-${{ matrix.arch }}-${{ matrix.ossl-branch }}-v1
 
       - name: Build OpenSSL (${{ matrix.ossl-branch }})
         if: steps.cache-ossl.outputs.cache-hit != 'true'
@@ -59,11 +63,11 @@ jobs:
             -DOPENSSL_SSL_LIBRARY="$O/lib/libssl.so"
           cmake --build build -j"$(nproc)"
 
-      - name: Show advertised algorithms
+      - name: Show advertised algorithms and active backend
         run: |
           O="${{ github.workspace }}/ossl"
           LD_LIBRARY_PATH="$O/lib" OPENSSL_MODULES="$PWD/build" \
-            "$O/bin/openssl" list -signature-algorithms -provider mldsanative
+            "$O/bin/openssl" list -providers -verbose -provider mldsanative
 
       - name: Run tests (KAT + interop + IETF pqc-certificates)
         run: |

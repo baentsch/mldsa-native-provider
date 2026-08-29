@@ -71,7 +71,10 @@ interop against before then; ² libcrypto's X.509 certificate machinery only
 understands ML-DSA from 3.5. Both tests self-skip below 3.5 rather than fail.
 
 CI (`.github/workflows/ci.yml`) builds against the `openssl-3.2` and
-`openssl-3.5` branches and runs the full test suite on each.
+`openssl-3.5` branches on both **x86_64** and **aarch64** GitHub runners, runs
+the full test suite on each, and (on 3.5) prints the benchmark so the
+CPU-optimized numbers for the AVX2 and AArch64 asm backends are visible per
+architecture.
 
 ## Build
 
