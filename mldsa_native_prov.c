@@ -6,7 +6,9 @@
  * the mldsa-native ML-DSA provider.
  */
 
+#include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 #include <openssl/provider.h>
 #include <openssl/rand.h>
@@ -229,6 +231,76 @@ static const OSSL_ALGORITHM *mldsa_query(void *provctx, int operation_id,
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* TLS-SIGALG capability (only advertised on OpenSSL < 3.5)            */
+/* ------------------------------------------------------------------ */
+
+/*
+ * TLS 1.3 SignatureScheme code points for ML-DSA (IANA / OpenSSL 3.5 names
+ * "mldsa44/65/87", code points 0x0904/0x0905/0x0906). On 3.5+ the default
+ * provider advertises these; we only do so when it is absent.
+ */
+typedef struct {
+    const char *iana_name;   /* TLS sigalg name, e.g. "mldsa44" */
+    const char *oid;
+    const char *keytype;     /* our keymgmt name, e.g. "ML-DSA-44" */
+    unsigned int code_point;
+    unsigned int sec_bits;
+} MLDSA_TLS_SIGALG;
+
+static const MLDSA_TLS_SIGALG mldsa_tls_sigalgs[] = {
+    { "mldsa44", "2.16.840.1.101.3.4.3.17", "ML-DSA-44", 0x0904, 128 },
+    { "mldsa65", "2.16.840.1.101.3.4.3.18", "ML-DSA-65", 0x0905, 192 },
+    { "mldsa87", "2.16.840.1.101.3.4.3.19", "ML-DSA-87", 0x0906, 256 },
+};
+static const int mldsa_tls_min = 0x0304;   /* TLS 1.3 only */
+static const int mldsa_tls_max = 0;
+
+static int mldsa_sigalg_capability(OSSL_CALLBACK *cb, void *arg)
+{
+    size_t i;
+
+    for (i = 0; i < sizeof(mldsa_tls_sigalgs) / sizeof(mldsa_tls_sigalgs[0]);
+         i++) {
+        const MLDSA_TLS_SIGALG *s = &mldsa_tls_sigalgs[i];
+        OSSL_PARAM p[9];
+        int n = 0;
+
+        p[n++] = OSSL_PARAM_construct_utf8_string(
+            OSSL_CAPABILITY_TLS_SIGALG_IANA_NAME, (char *)s->iana_name, 0);
+        p[n++] = OSSL_PARAM_construct_utf8_string(
+            OSSL_CAPABILITY_TLS_SIGALG_NAME, (char *)s->iana_name, 0);
+        p[n++] = OSSL_PARAM_construct_utf8_string(
+            OSSL_CAPABILITY_TLS_SIGALG_OID, (char *)s->oid, 0);
+        p[n++] = OSSL_PARAM_construct_utf8_string(
+            OSSL_CAPABILITY_TLS_SIGALG_KEYTYPE, (char *)s->keytype, 0);
+        p[n++] = OSSL_PARAM_construct_uint(
+            OSSL_CAPABILITY_TLS_SIGALG_CODE_POINT, (unsigned int *)&s->code_point);
+        p[n++] = OSSL_PARAM_construct_uint(
+            OSSL_CAPABILITY_TLS_SIGALG_SECURITY_BITS, (unsigned int *)&s->sec_bits);
+        p[n++] = OSSL_PARAM_construct_int(
+            OSSL_CAPABILITY_TLS_SIGALG_MIN_TLS, (int *)&mldsa_tls_min);
+        p[n++] = OSSL_PARAM_construct_int(
+            OSSL_CAPABILITY_TLS_SIGALG_MAX_TLS, (int *)&mldsa_tls_max);
+        p[n] = OSSL_PARAM_construct_end();
+        if (!cb(p, arg))
+            return 0;
+    }
+    return 1;
+}
+
+static int mldsa_get_capabilities(void *provctx, const char *capability,
+                                  OSSL_CALLBACK *cb, void *arg)
+{
+    PROV_MLDSA_CTX *ctx = provctx;
+
+    /* Only fill the gap on OpenSSL that lacks native ML-DSA TLS sigalgs. */
+    if (ctx != NULL && ctx->legacy
+        && strcasecmp(capability, "TLS-SIGALG") == 0)
+        return mldsa_sigalg_capability(cb, arg);
+    return 0;
+}
+
 static void mldsa_teardown(void *provctx)
 {
     PROV_MLDSA_CTX *ctx = provctx;
@@ -244,6 +316,7 @@ static const OSSL_DISPATCH mldsa_dispatch_table[] = {
     { OSSL_FUNC_PROVIDER_GETTABLE_PARAMS, (void (*)(void))mldsa_gettable_params },
     { OSSL_FUNC_PROVIDER_GET_PARAMS, (void (*)(void))mldsa_get_params },
     { OSSL_FUNC_PROVIDER_QUERY_OPERATION, (void (*)(void))mldsa_query },
+    { OSSL_FUNC_PROVIDER_GET_CAPABILITIES, (void (*)(void))mldsa_get_capabilities },
     { 0, NULL }
 };
 
@@ -252,8 +325,30 @@ int OSSL_provider_init(const OSSL_CORE_HANDLE *handle, const OSSL_DISPATCH *in,
 int OSSL_provider_init(const OSSL_CORE_HANDLE *handle, const OSSL_DISPATCH *in,
                        const OSSL_DISPATCH **out, void **provctx)
 {
-    PROV_MLDSA_CTX *ctx = OPENSSL_zalloc(sizeof(*ctx));
+    PROV_MLDSA_CTX *ctx;
+    OSSL_FUNC_core_get_params_fn *c_get_params = NULL;
+    OSSL_FUNC_core_obj_create_fn *c_obj_create = NULL;
+    OSSL_FUNC_core_obj_add_sigid_fn *c_obj_add_sigid = NULL;
+    const OSSL_DISPATCH *fns = in;
+    const char *vers = NULL;
 
+    for (; fns->function_id != 0; fns++) {
+        switch (fns->function_id) {
+        case OSSL_FUNC_CORE_GET_PARAMS:
+            c_get_params = OSSL_FUNC_core_get_params(fns);
+            break;
+        case OSSL_FUNC_CORE_OBJ_CREATE:
+            c_obj_create = OSSL_FUNC_core_obj_create(fns);
+            break;
+        case OSSL_FUNC_CORE_OBJ_ADD_SIGID:
+            c_obj_add_sigid = OSSL_FUNC_core_obj_add_sigid(fns);
+            break;
+        default:
+            break;
+        }
+    }
+
+    ctx = OPENSSL_zalloc(sizeof(*ctx));
     if (ctx == NULL)
         return 0;
     ctx->handle = handle;
@@ -263,6 +358,37 @@ int OSSL_provider_init(const OSSL_CORE_HANDLE *handle, const OSSL_DISPATCH *in,
         OPENSSL_free(ctx);
         return 0;
     }
+
+    /* "legacy" = the surrounding OpenSSL lacks native ML-DSA (< 3.5). */
+    if (c_get_params != NULL) {
+        OSSL_PARAM req[2];
+        int maj = 0, min = 0;
+
+        req[0] = OSSL_PARAM_construct_utf8_ptr(OSSL_PROV_PARAM_CORE_VERSION,
+                                               (char **)&vers, 0);
+        req[1] = OSSL_PARAM_construct_end();
+        if (c_get_params(handle, req) && vers != NULL
+            && sscanf(vers, "%d.%d", &maj, &min) == 2)
+            ctx->legacy = (maj < 3) || (maj == 3 && min < 5);
+    }
+
+    /*
+     * On OpenSSL < 3.5 the core does not know the ML-DSA OIDs; register them
+     * and their signature-id mapping so X.509/CMS signing resolves. On 3.5+
+     * the default provider already does this -- stay out of the way.
+     */
+    if (ctx->legacy && c_obj_create != NULL && c_obj_add_sigid != NULL) {
+        const MLDSA_PARAMS *lv[3] = {
+            &mldsa_params_44, &mldsa_params_65, &mldsa_params_87
+        };
+        size_t i;
+
+        for (i = 0; i < 3; i++) {
+            (void)c_obj_create(handle, lv[i]->oid, lv[i]->name, lv[i]->name);
+            (void)c_obj_add_sigid(handle, lv[i]->name, "", lv[i]->name);
+        }
+    }
+
     *provctx = ctx;
     *out = mldsa_dispatch_table;
     return 1;

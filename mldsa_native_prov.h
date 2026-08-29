@@ -44,6 +44,14 @@ int randombytes(uint8_t *out, size_t outlen);
 typedef struct prov_mldsa_ctx_st {
     const OSSL_CORE_HANDLE *handle;
     OSSL_LIB_CTX *libctx;   /* child libctx mirroring the parent */
+    /*
+     * 1 when the surrounding OpenSSL lacks native ML-DSA (< 3.5). Only then do
+     * we add the pieces the core/default provider would otherwise supply:
+     * OID+sigid registration, the TLS-SIGALG capability, and text/encrypted-
+     * PKCS8 encoders. On 3.5+ these come from the default provider, so we stay
+     * out of the way to avoid duplicate registration.
+     */
+    int legacy;
 } PROV_MLDSA_CTX;
 
 #define PROV_MLDSA_LIBCTX(pctx) (((PROV_MLDSA_CTX *)(pctx))->libctx)

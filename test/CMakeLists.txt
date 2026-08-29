@@ -22,11 +22,23 @@ target_include_directories(mldsa_interop_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR} ${OPENSSL_INCLUDE_DIR})
 target_link_libraries(mldsa_interop_test PRIVATE OpenSSL::Crypto)
 
+add_executable(mldsa_tls_test mldsa_tls_test.c)
+target_include_directories(mldsa_tls_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR} ${OPENSSL_INCLUDE_DIR})
+target_link_libraries(mldsa_tls_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+
 add_test(NAME kat COMMAND mldsa_kat_test)
 add_test(NAME interop COMMAND mldsa_interop_test)
+add_test(NAME tls COMMAND mldsa_tls_test)
 
 set_tests_properties(kat interop PROPERTIES
     ENVIRONMENT "${TEST_ENV}"
+    DEPENDS mldsanative)
+# tls self-skips (77) on OpenSSL >= 3.5 (capability inactive) or if SSL_CTX
+# init is unavailable; CI's fresh openssl-3.2 build exercises the real handshake.
+set_tests_properties(tls PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    SKIP_RETURN_CODE 77
     DEPENDS mldsanative)
 
 # IETF pqc-certificates cross-implementation interop (self-skips w/o network).
