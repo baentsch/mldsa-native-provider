@@ -22,7 +22,12 @@
 #include <openssl/err.h>
 
 #include "mldsa_native_compat.h"
-#include "mldsa_kat_vectors.h"
+/*
+ * FIPS-204 known-answer vectors are sourced directly from the pinned
+ * mldsa-native submodule (not copied into this repo), so they always match the
+ * exact crypto version under test.
+ */
+#include "expected_test_vectors_multilevel.h"
 
 static int failures = 0;
 

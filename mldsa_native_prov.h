@@ -25,7 +25,7 @@
 /* Fallback OSSL_PARAM name macros for OpenSSL 3.2-3.4 headers. */
 #include "mldsa_native_compat.h"
 
-/* Vendored mldsa-native multi-level public API: mldsa44_ / mldsa65_ / mldsa87_. */
+/* mldsa-native (submodule) multi-level public API: mldsa44_/mldsa65_/mldsa87_. */
 #include "mldsa_native_all.h"
 
 /* mldsa-native's entropy hook, implemented in mldsa_native_prov.c. */

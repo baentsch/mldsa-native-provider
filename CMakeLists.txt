@@ -2,9 +2,9 @@ cmake_minimum_required(VERSION 3.16 FATAL_ERROR)
 project(mldsa-native-provider LANGUAGES C)
 
 #
-# An external OpenSSL 3.5+ provider implementing ML-DSA (FIPS 204) signatures
-# ONLY, using the vendored mldsa-native implementation directly. No KEM, no
-# delegation to OpenSSL's own ML-DSA.
+# An external OpenSSL 3.2+ provider implementing ML-DSA (FIPS 204) signatures
+# ONLY, using the mldsa-native implementation (git submodule) directly. No KEM,
+# no delegation to OpenSSL's own ML-DSA.
 #
 
 set(CMAKE_C_STANDARD 11)
@@ -22,13 +22,24 @@ find_package(OpenSSL 3.2 REQUIRED)
 # Where to load the provider .so from during tests, and the runtime lib path.
 get_filename_component(OPENSSL_LIB_DIR "${OPENSSL_CRYPTO_LIBRARY}" DIRECTORY)
 
-# ---- vendored mldsa-native (multi-level monolithic build) ----
-set(MLDSA_NATIVE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor")
-set(MLDSA_NATIVE_SRC "${MLDSA_NATIVE_DIR}/mldsa_native_all.c")
+# ---- mldsa-native (git submodule, multi-level monolithic build) ----
+# The crypto comes from a pinned submodule; only small integration glue (the
+# multi-level wrapper and our config) lives in this repo. The submodule stays
+# pristine -- configuration is injected via -DMLD_CONFIG_FILE.
+set(MLDSA_SUBMODULE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mldsa-native")
+set(MLDSA_SRC_DIR "${MLDSA_SUBMODULE_DIR}/mldsa")
+set(MLDSA_GLUE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/mldsa_glue")
+set(MLDSA_NATIVE_SRC "${MLDSA_GLUE_DIR}/mldsa_native_all.c")
+
+if(NOT EXISTS "${MLDSA_SRC_DIR}/mldsa_native.c")
+    message(FATAL_ERROR
+        "mldsa-native submodule not found at ${MLDSA_SRC_DIR}.\n"
+        "Run: git submodule update --init --recursive")
+endif()
 
 # mldsa-native ships optimized assembly backends for x86_64 (AVX2) and AArch64;
 # elsewhere it falls back to portable C (like OpenSSL's cross-platform ML-DSA).
-# AUTO enables the native backend on supported CPUs, OFF forces portable C.
+# AUTO enables the native backend on supported CPUs, PORTABLE forces C.
 set(MLDSA_NATIVE_BACKEND "AUTO" CACHE STRING
     "mldsa-native arithmetic/FIPS202 backend: AUTO, NATIVE, or PORTABLE")
 
@@ -38,7 +49,7 @@ set(MLDSA_BACKEND_DESC "portable C")
 if(NOT MLDSA_NATIVE_BACKEND STREQUAL "PORTABLE")
     if(_mld_arch MATCHES "x86_64|amd64|aarch64|arm64")
         enable_language(ASM)
-        set(_mld_asm "${MLDSA_NATIVE_DIR}/mldsa_native/mldsa_native_asm.S")
+        set(_mld_asm "${MLDSA_SRC_DIR}/mldsa_native_asm.S")
         set(MLDSA_BACKEND_DESC "native (${_mld_arch} asm)")
     elseif(MLDSA_NATIVE_BACKEND STREQUAL "NATIVE")
         message(FATAL_ERROR
@@ -47,20 +58,22 @@ if(NOT MLDSA_NATIVE_BACKEND STREQUAL "PORTABLE")
 endif()
 message(STATUS "mldsa-native backend: ${MLDSA_BACKEND_DESC}")
 
-# Compile the amalgamation (and asm) without our stricter provider warnings,
-# and with the native-backend switches when enabled.
-set(_mld_defs "")
+# Native-backend switches apply only to the amalgamation and the asm; the
+# out-of-tree config (MLD_CONFIG_FILE) is injected target-wide below, since every
+# TU that includes the mldsa-native headers needs the multi-level config.
+set(_mld_native_defs "")
 if(_mld_asm)
-    set(_mld_defs
+    set(_mld_native_defs
         MLD_CONFIG_USE_NATIVE_BACKEND_ARITH
         MLD_CONFIG_USE_NATIVE_BACKEND_FIPS202)
 endif()
+# Compile the amalgamation without our stricter provider warnings.
 set_source_files_properties(${MLDSA_NATIVE_SRC} PROPERTIES
     COMPILE_OPTIONS "-w"
-    COMPILE_DEFINITIONS "${_mld_defs}")
+    COMPILE_DEFINITIONS "${_mld_native_defs}")
 if(_mld_asm)
     set_source_files_properties(${_mld_asm} PROPERTIES
-        COMPILE_DEFINITIONS "${_mld_defs};MLD_CONFIG_MULTILEVEL_WITH_SHARED")
+        COMPILE_DEFINITIONS "${_mld_native_defs};MLD_CONFIG_MULTILEVEL_WITH_SHARED")
 endif()
 
 set(PROVIDER_SOURCES
@@ -75,14 +88,16 @@ set(PROVIDER_SOURCES
 
 add_library(mldsanative MODULE ${PROVIDER_SOURCES})
 
-# Make the active backend visible via the provider's build-info string.
+# Inject our config into every TU (the submodule stays pristine) and expose the
+# active backend via the provider's build-info string.
 target_compile_definitions(mldsanative PRIVATE
+    "MLD_CONFIG_FILE=\"mldsa_provider_config.h\""
     "MLDSANATIVE_BACKEND_STR=\"${MLDSA_BACKEND_DESC}\"")
 
 target_include_directories(mldsanative PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${MLDSA_NATIVE_DIR}
-    ${MLDSA_NATIVE_DIR}/mldsa_native
+    ${MLDSA_GLUE_DIR}
+    ${MLDSA_SRC_DIR}
     ${OPENSSL_INCLUDE_DIR}
 )
 

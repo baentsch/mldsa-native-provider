@@ -7,9 +7,14 @@ set(TEST_ENV
     "LD_LIBRARY_PATH=${OPENSSL_LIB_DIR}"
 )
 
+# KAT vectors come from the pinned mldsa-native submodule example directory.
+set(MLDSA_KAT_VECTORS_DIR
+    "${CMAKE_SOURCE_DIR}/third_party/mldsa-native/examples/monolithic_build_multilevel")
+
 add_executable(mldsa_kat_test mldsa_kat_test.c)
 target_include_directories(mldsa_kat_test PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR} ${OPENSSL_INCLUDE_DIR})
+    ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}
+    ${MLDSA_KAT_VECTORS_DIR} ${OPENSSL_INCLUDE_DIR})
 target_link_libraries(mldsa_kat_test PRIVATE OpenSSL::Crypto)
 
 add_executable(mldsa_interop_test mldsa_interop_test.c)

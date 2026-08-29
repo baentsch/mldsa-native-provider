@@ -6,7 +6,7 @@ build*/
 *.a
 *.d
 
-# Upstream mldsa-native checkout (only vendor/ is tracked)
+# Stray upstream checkout (the crypto is the third_party/mldsa-native submodule)
 /mldsa-native/
 
 # Editor / misc
