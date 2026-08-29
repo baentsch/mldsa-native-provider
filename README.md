@@ -85,6 +85,41 @@ cmake --build build
 
 This produces `build/mldsanative.so`.
 
+### Build options
+
+| `-DMLDSA_NATIVE_BACKEND=` | effect |
+|---|---|
+| `AUTO` (default) | mldsa-native's optimized **asm backend** on x86_64 (AVX2) / AArch64, else portable C |
+| `NATIVE` | force the asm backend (configure error on unsupported CPUs) |
+| `PORTABLE` | force portable C everywhere (apples-to-apples vs the default provider) |
+
+The active backend is reported at configure time and in
+`openssl list -providers -verbose -provider mldsanative` (the `build info` line).
+
+## Selecting which ML-DSA runs (default vs this provider)
+
+There is **no cede-to-default logic**: when both providers are loaded they both
+offer `ML-DSA-44/65/87`, so you pick the implementation explicitly with a
+property query — `-propquery '?provider=mldsanative'` or `'?provider=default'`
+on the CLI, `default_properties` in `openssl.cnf`, or the propquery argument in
+the EVP API. **[USAGE.md](USAGE.md)** documents all three with worked examples.
+
+## Performance
+
+`test/benchmark.sh` is a worked `openssl speed` example that runs each level
+under both providers (differing only in the property query) and prints a
+comparison plus the machine and active backend:
+
+```sh
+OPENSSL=/path/to/openssl OPENSSL_LIBPATH=/path/to/openssl/lib \
+MODULE_DIR=$PWD/build  test/benchmark.sh
+```
+
+Because mldsa-native is optimized for **specific CPUs** (x86_64 AVX2, AArch64)
+while the default provider's ML-DSA is **portable C everywhere**, the speed-up
+is platform-specific — measure on your target hardware. See the "Performance and
+platform targeting" section of [USAGE.md](USAGE.md) for details and caveats.
+
 ## Test
 
 ```sh
@@ -118,8 +153,9 @@ mldsa_native_encoder.c      SPKI + PKCS8 encoders (DER + PEM)
 mldsa_native_decoder.c      SPKI + PKCS8 decoders (DER; PEM via OpenSSL pem2der)
 mldsa_native_compat.h       OSSL_PARAM name shims for OpenSSL 3.2-3.4 headers
 vendor/                     vendored mldsa-native (multi-level monolithic build)
-test/                       KAT + interop tests, IETF interop script, FIPS 204 vectors
+test/                       KAT + interop tests, IETF interop + benchmark scripts
 .github/workflows/ci.yml    CI: build + test against openssl-3.2 and openssl-3.5
+USAGE.md                    selecting default vs this provider; performance & platforms
 ```
 
 ## Vendored code & license

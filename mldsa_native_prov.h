@@ -33,6 +33,10 @@ int randombytes(uint8_t *out, size_t outlen);
 
 #define MLDSANATIVE_PROV_NAME "mldsa-native-provider"
 #define MLDSANATIVE_PROV_VERSION "0.1.0"
+/* Active mldsa-native backend, injected by CMake (see MLDSA_NATIVE_BACKEND). */
+#ifndef MLDSANATIVE_BACKEND_STR
+# define MLDSANATIVE_BACKEND_STR "portable C"
+#endif
 /* Property advertised on every algorithm this provider serves. */
 #define MLDSANATIVE_PROPS "provider=mldsanative"
 

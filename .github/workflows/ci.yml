@@ -69,3 +69,11 @@ jobs:
         run: |
           O="${{ github.workspace }}/ossl"
           LD_LIBRARY_PATH="$O/lib" ctest --test-dir build --output-on-failure --no-tests=error
+
+      - name: Benchmark vs default provider (informational)
+        if: matrix.ossl-branch == 'openssl-3.5'
+        continue-on-error: true
+        run: |
+          O="${{ github.workspace }}/ossl"
+          OPENSSL="$O/bin/openssl" OPENSSL_LIBPATH="$O/lib" \
+            MODULE_DIR="$PWD/build" SECONDS_PER=2 bash test/benchmark.sh

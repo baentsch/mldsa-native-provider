@@ -26,9 +26,42 @@ get_filename_component(OPENSSL_LIB_DIR "${OPENSSL_CRYPTO_LIBRARY}" DIRECTORY)
 set(MLDSA_NATIVE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor")
 set(MLDSA_NATIVE_SRC "${MLDSA_NATIVE_DIR}/mldsa_native_all.c")
 
-# Compile the amalgamation without our stricter provider warnings.
+# mldsa-native ships optimized assembly backends for x86_64 (AVX2) and AArch64;
+# elsewhere it falls back to portable C (like OpenSSL's cross-platform ML-DSA).
+# AUTO enables the native backend on supported CPUs, OFF forces portable C.
+set(MLDSA_NATIVE_BACKEND "AUTO" CACHE STRING
+    "mldsa-native arithmetic/FIPS202 backend: AUTO, NATIVE, or PORTABLE")
+
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _mld_arch)
+set(_mld_asm "")
+set(MLDSA_BACKEND_DESC "portable C")
+if(NOT MLDSA_NATIVE_BACKEND STREQUAL "PORTABLE")
+    if(_mld_arch MATCHES "x86_64|amd64|aarch64|arm64")
+        enable_language(ASM)
+        set(_mld_asm "${MLDSA_NATIVE_DIR}/mldsa_native/mldsa_native_asm.S")
+        set(MLDSA_BACKEND_DESC "native (${_mld_arch} asm)")
+    elseif(MLDSA_NATIVE_BACKEND STREQUAL "NATIVE")
+        message(FATAL_ERROR
+            "MLDSA_NATIVE_BACKEND=NATIVE but no asm backend for ${_mld_arch}")
+    endif()
+endif()
+message(STATUS "mldsa-native backend: ${MLDSA_BACKEND_DESC}")
+
+# Compile the amalgamation (and asm) without our stricter provider warnings,
+# and with the native-backend switches when enabled.
+set(_mld_defs "")
+if(_mld_asm)
+    set(_mld_defs
+        MLD_CONFIG_USE_NATIVE_BACKEND_ARITH
+        MLD_CONFIG_USE_NATIVE_BACKEND_FIPS202)
+endif()
 set_source_files_properties(${MLDSA_NATIVE_SRC} PROPERTIES
-    COMPILE_OPTIONS "-w")
+    COMPILE_OPTIONS "-w"
+    COMPILE_DEFINITIONS "${_mld_defs}")
+if(_mld_asm)
+    set_source_files_properties(${_mld_asm} PROPERTIES
+        COMPILE_DEFINITIONS "${_mld_defs};MLD_CONFIG_MULTILEVEL_WITH_SHARED")
+endif()
 
 set(PROVIDER_SOURCES
     mldsa_native_prov.c
@@ -37,9 +70,14 @@ set(PROVIDER_SOURCES
     mldsa_native_encoder.c
     mldsa_native_decoder.c
     ${MLDSA_NATIVE_SRC}
+    ${_mld_asm}
 )
 
 add_library(mldsanative MODULE ${PROVIDER_SOURCES})
+
+# Make the active backend visible via the provider's build-info string.
+target_compile_definitions(mldsanative PRIVATE
+    "MLDSANATIVE_BACKEND_STR=\"${MLDSA_BACKEND_DESC}\"")
 
 target_include_directories(mldsanative PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
