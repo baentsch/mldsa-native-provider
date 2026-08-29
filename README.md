@@ -25,6 +25,70 @@ This differs from its siblings
 which compose or delegate to other providers/libraries: here the FIPS 204 core
 is mldsa-native and nothing else.
 
+## How it compares to oqs-provider and hybrid-provider
+
+The three providers occupy deliberately different points in the design space:
+
+| | **mldsa-native-provider** | **oqs-provider** | **hybrid-provider** |
+|---|---|---|---|
+| Scope | ML-DSA signatures only | all liboqs PQ KEMs **and** signatures (dozens) | hybrid + composite KEMs and signatures (many) |
+| Crypto source | **mldsa-native, vendored, called directly** | **liboqs** (external library, its C API) | **none of its own** — delegates to other providers via EVP |
+| Abstraction layers | one: provider → mldsa-native function | two: provider → liboqs `OQS_SIG_*` → primitive | provider → EVP → whichever provider serves each half |
+| Runtime dependencies | just `libcrypto` | `libcrypto` **+ liboqs** | `libcrypto` **+ ≥1 other provider** present at run time |
+| OID / code-point handling | standard names/OIDs, no patching | runtime `OBJ_create`/code-point patching | inherits component identities |
+| Hybrid / composite logic | none | some | the entire point |
+
+Structurally that makes this the *flat, single-purpose* member of the family:
+no algorithm registry, no external crypto library, no runtime composition, no
+OID patching — the provider is a thin, direct binding over one focused,
+formally-verified implementation.
+
+### Code size
+
+Measured with `wc -l` over C/H (and asm) sources in each repository:
+
+| Component | mldsa-native-provider | oqs-provider | hybrid-provider |
+|---|--:|--:|--:|
+| Provider logic (the code you audit) | **~2.0k** | ~13.4k | ~9.5k |
+| Bundled crypto | mldsa-native ~18k C/H + 0.8k asm¹ | none bundled | none bundled |
+| External crypto dependency | none | **liboqs ~174k** | other providers (varies) |
+| Tests | ~0.5k C + 0.3k shell (+4.1k KAT data) | — | — |
+
+¹ mldsa-native covers all three ML-DSA levels with a portable-C core (~11.5k)
+plus optional x86_64/AArch64 backends (~4k C + 0.8k asm), and is
+[formally verified with CBMC](https://github.com/pq-code-package/mldsa-native).
+
+### Does less code mean less vulnerability potential?
+
+Partly, and it is a fair argument — with caveats worth stating honestly:
+
+- **Yes, in the ways that matter for attack/audit surface.** The provider logic
+  you must review is ~2k lines versus ~9–13k, there is **no dependency on a
+  ~174k-line multi-algorithm library**, and there is **no EVP-composition or
+  OID-patching machinery**. Removing intermediate abstractions and dynamic
+  dispatch eliminates whole classes of integration and misconfiguration bugs.
+  Fewer lines and fewer moving parts genuinely lower the cost of a complete
+  audit and the surface an attacker can reach.
+- **But it is not a like-for-like comparison.** oqs-provider and hybrid-provider
+  are smaller-per-algorithm precisely because they are *broader by design*
+  (many algorithms, hybrids, composites). Most of this provider's smallness is
+  scope, not superior engineering.
+- **The crypto still exists and still counts.** We vendor ~18k lines of
+  mldsa-native — it is simply single-purpose. What actually strengthens the
+  security story there is not the line count but that mldsa-native is
+  **formally verified (CBMC) and constant-time-checked**; that is a stronger
+  signal than raw LOC.
+- **Vendoring shifts, not removes, responsibility.** Pinning a copy of
+  mldsa-native means tracking upstream fixes ourselves (a supply-chain duty),
+  whereas a shared `liboqs` is patched in one place.
+- **LOC is a weak proxy.** Complexity, memory safety, and test/verification
+  coverage predict vulnerabilities far better than line count.
+
+Bottom line: the smaller, dependency-light, single-purpose design does reduce
+attack surface and audit burden — but the durable security benefits come from
+**no intermediate layers, no extra runtime dependencies, and a formally-verified
+core**, more than from the line count itself.
+
 ## Interoperability with the OpenSSL default provider
 
 Verified by the test suite and byte-for-byte against OpenSSL 3.5's default
@@ -120,8 +184,20 @@ MODULE_DIR=$PWD/build  test/benchmark.sh
 
 Because mldsa-native is optimized for **specific CPUs** (x86_64 AVX2, AArch64)
 while the default provider's ML-DSA is **portable C everywhere**, the speed-up
-is platform-specific — measure on your target hardware. See the "Performance and
-platform targeting" section of [USAGE.md](USAGE.md) for details and caveats.
+is platform-specific — measure on your target hardware. As a vivid illustration,
+the CI benchmark (this provider vs the default provider, same OpenSSL 3.5) gives
+very different ratios per architecture:
+
+| operation | x86_64 (AMD EPYC 7763, AVX2) | aarch64 (Neoverse-N2) |
+|---|--:|--:|
+| ML-DSA-65 keygen | ~1.5× | ~3.2× |
+| ML-DSA-65 sign   | ~2.0× | ~6.8× |
+| ML-DSA-65 verify | ~1.5× | ~3.6× |
+
+Same code, same algorithm — the AArch64 backend simply wins more over portable
+C on that core. Don't carry one architecture's number to another. See the
+"Performance and platform targeting" section of [USAGE.md](USAGE.md) for details
+and caveats.
 
 ## Test
 
