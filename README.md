@@ -1,6 +1,6 @@
 # mldsa-native-provider
 
-An external OpenSSL 3.5+ provider implementing **ML-DSA** (FIPS 204) digital
+An external OpenSSL 3.2+ provider implementing **ML-DSA** (FIPS 204) digital
 signatures — and nothing else — on top of the
 [mldsa-native](https://github.com/pq-code-package/mldsa-native) implementation.
 
@@ -21,15 +21,16 @@ signatures — and nothing else — on top of the
 - **Signatures only — no KEM.**
 
 This differs from its siblings
-[hybrid-provider](https://github.com/baentsch/hybrid-provider) and oqs-provider,
+[hybrid-provider](https://github.com/baentsch/hybrid-provider) and
+[oqs-provider](https://github.com/open-quantum-safe/oqs-provider),
 which compose or delegate to other providers/libraries: here the FIPS 204 core
 is mldsa-native and nothing else.
 
-## How it compares to oqs-provider and hybrid-provider
+## How it compares to [oqs-provider](https://github.com/open-quantum-safe/oqs-provider) and [hybrid-provider](https://github.com/baentsch/hybrid-provider)
 
 The three providers occupy deliberately different points in the design space:
 
-| | **mldsa-native-provider** | **oqs-provider** | **hybrid-provider** |
+| | **mldsa-native-provider** | **[oqs-provider](https://github.com/open-quantum-safe/oqs-provider)** | **[hybrid-provider](https://github.com/baentsch/hybrid-provider)** |
 |---|---|---|---|
 | Scope | ML-DSA signatures only | all liboqs PQ KEMs **and** signatures (dozens) | hybrid + composite KEMs and signatures (many) |
 | Crypto source | **mldsa-native, vendored, called directly** | **liboqs** (external library, its C API) | **none of its own** — delegates to other providers via EVP |
@@ -47,12 +48,12 @@ implementation.
 
 Measured with `wc -l` over C/H (and asm) sources in each repository:
 
-| Component | mldsa-native-provider | oqs-provider | hybrid-provider |
+| Component | mldsa-native-provider | [oqs-provider](https://github.com/open-quantum-safe/oqs-provider) | [hybrid-provider](https://github.com/baentsch/hybrid-provider) |
 |---|--:|--:|--:|
 | Provider logic (the code you audit) | **~2.0k** | ~13.4k | ~9.5k |
 | Bundled crypto | mldsa-native ~18k C/H + 0.8k asm¹ | none bundled | none bundled |
 | External crypto dependency | none | **liboqs ~174k** | other providers (varies) |
-| Tests | ~0.5k C + 0.3k shell (+4.1k KAT data) | — | — |
+| Tests (excl. embedded KAT vectors) | ~0.5k C + 0.3k shell | ~3.3k C | ~12.3k C + 1.4k shell |
 
 ¹ [mldsa-native](https://github.com/pq-code-package/mldsa-native) covers all
 three ML-DSA levels with a portable-C core (~11.5k) plus optional x86_64/AArch64
@@ -69,7 +70,9 @@ Partly, and it is a fair argument — with caveats worth stating honestly:
   dispatch eliminates whole classes of integration and misconfiguration bugs.
   Fewer lines and fewer moving parts genuinely lower the cost of a complete
   audit and the surface an attacker can reach.
-- **But it is not a like-for-like comparison.** oqs-provider and hybrid-provider
+- **But it is not a like-for-like comparison.**
+  [oqs-provider](https://github.com/open-quantum-safe/oqs-provider) and
+  [hybrid-provider](https://github.com/baentsch/hybrid-provider)
   are smaller-per-algorithm precisely because they are *broader by design*
   (many algorithms, hybrids, composites). Most of this provider's smallness is
   scope, not superior engineering.
@@ -147,7 +150,7 @@ Requires CMake 3.16+, a C11 compiler, and OpenSSL **3.2+** (tested floor;
 **3.5+** for the default-provider and IETF cert interop).
 
 ```sh
-cmake -S . -B build -DOPENSSL_ROOT_DIR=/path/to/openssl-3.5
+cmake -S . -B build -DOPENSSL_ROOT_DIR=/path/to/openssl
 cmake --build build
 ```
 
