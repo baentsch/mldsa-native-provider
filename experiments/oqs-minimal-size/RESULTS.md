@@ -6,6 +6,42 @@ modules (crypto statically linked), gcc `-O3`/Release. `mldsanative.so` is built
 with its native backend (x86_64 AVX2 asm), matching the mldsa-native core that
 liboqs — and therefore oqs-provider — also compiles. Reproduce with `run.sh`.
 
+## Head-to-head summary (TL;DR)
+
+For the same ML-DSA functionality, this provider is **both smaller and faster**
+than a minimal oqs-provider. Two things to keep straight when reading every table
+below:
+
+- **Size** is a stripped module in KiB — **smaller is better** (↓).
+- **Speed** is *throughput* in **k ops/s = thousands of operations per second** —
+  **bigger is better** (↑). `30.6` means 30,600 operations every second; a larger
+  number finishes more work per second, i.e. is faster. (As time-per-op that is
+  1/30600 s ≈ 33 µs; the reciprocal, where smaller would be better — but the
+  tables are all throughput.)
+
+**Plain ML-DSA** — `mldsanative.so` vs `oqsprovider.so`, level ML-DSA-65 (mid):
+
+| plain ML-DSA-65 | this provider | oqs-provider | this provider is |
+|---|--:|--:|:--|
+| module size, stripped (↓ better) | **211.1 KiB** | 494.9 KiB | **2.3× smaller** |
+| keygen, k ops/s (↑ better) | **30.6** | 23.8 | **1.29× faster** |
+| sign, k ops/s (↑ better) | **11.2** | 9.6 | **1.17× faster** |
+| verify, k ops/s (↑ better) | **31.4** | 24.3 | **1.29× faster** |
+
+Across all three levels: **2.3× smaller** and **1.12–1.34× faster** on keygen /
+sign / verify. In every speed row the bigger number is on this provider's side.
+
+**ML-DSA + the 4 ML-DSA hybrids** — functionally equivalent stacks:
+
+| equivalent-functionality stack | Side B: this + hybrid-provider | Side A: oqs-provider | Side B is |
+|---|--:|--:|:--|
+| total module size, stripped (↓ better) | **310.5 KiB** (211.1 + 99.3) | 523.9 KiB | **1.69× smaller** |
+| plain-ML-DSA speed | 1.12–1.34× faster | baseline | **faster** |
+| hybrid speed | ≈ parity (within ~8%) | baseline | ~equal |
+
+(keygen ratios from `ci/bench_regression.c`; sign/verify from `interop.c`; both
+reused-context. Per-level detail and the one-shot-vs-reused breakdown follow.)
+
 ## Goal
 
 An apples-to-apples comparison of the code that must ship to deliver the same
@@ -91,9 +127,10 @@ contexts = two parties; `--benchmark` also times sign/verify each side):
 **best of 5 measurement windows of ≥ 1 s each** — each window runs thousands of
 operations back-to-back, and reporting the best window discards transient
 glitches (scheduler preemption, turbo ramp, background load) instead of averaging
-them in, so the numbers are stable across runs. Throughput is in thousands of
-ops/sec (higher is better); the ratio column is ours ÷ oqs (> 1.0 = this provider
-faster). Two call paths are measured:
+them in, so the numbers are stable across runs. All figures are **throughput in
+k ops/s (thousands of operations per second), so the bigger number is faster**;
+the ratio column is ours ÷ oqs (> 1.0 = this provider faster). Two call paths are
+measured:
 
 - **one-shot** — a fresh `EVP_MD_CTX` with `EVP_DigestSign(Verify)Init` on every
   call. This is the real-world cost of a single detached sign/verify (X.509,
@@ -105,7 +142,7 @@ faster). Two call paths are measured:
 
 ### Plain ML-DSA — one-shot (fresh context per call)
 
-| algorithm | ours sign / verify | oqs sign / verify | ratio sign / verify |
+| algorithm | ours sign / verify (k ops/s ↑) | oqs sign / verify (k ops/s ↑) | ratio sign / verify |
 |---|--:|--:|--:|
 | ML-DSA-44 | 17.1 / 50.2 | 15.2 / 40.5 | **1.12× / 1.24×** |
 | ML-DSA-65 | 10.9 / 30.7 | 9.5 / 23.6 | **1.14× / 1.30×** |
@@ -113,7 +150,7 @@ faster). Two call paths are measured:
 
 ### Plain ML-DSA — reused context (`EVP_PKEY_CTX` kept across calls)
 
-| algorithm | ours sign / verify | oqs sign / verify | ratio sign / verify |
+| algorithm | ours sign / verify (k ops/s ↑) | oqs sign / verify (k ops/s ↑) | ratio sign / verify |
 |---|--:|--:|--:|
 | ML-DSA-44 | 17.6 / 52.2 | 15.5 / 42.4 | **1.14× / 1.23×** |
 | ML-DSA-65 | 11.2 / 31.4 | 9.6 / 24.3 | **1.17× / 1.29×** |
@@ -130,7 +167,7 @@ in the noise.
 
 ### ML-DSA hybrids — one-shot only
 
-| algorithm | ours sign / verify | oqs sign / verify | ratio sign / verify |
+| algorithm | ours sign / verify (k ops/s ↑) | oqs sign / verify (k ops/s ↑) | ratio sign / verify |
 |---|--:|--:|--:|
 | p256_mldsa44 | 11.5 / 13.1 | 11.2 / 12.3 | 1.03× / 1.06× |
 | rsa3072_mldsa44 | 0.6 / 18.2 | 0.6 / 16.9 | 1.00× / 1.08× |
