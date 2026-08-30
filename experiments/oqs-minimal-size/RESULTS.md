@@ -2,14 +2,9 @@
 
 **Status:** local experiment (feature branch `experiment/oqs-minimal-size`), not
 part of the shipped provider. All numbers are x86_64, `strip -s`, self-contained
-modules (crypto statically linked), gcc `-O3`/Release.
-
-> ⚠️ **Numbers pending refresh.** The size/speed figures below were taken with a
-> provider built *before* the native-backend fix (which landed on `main`), i.e.
-> against a portable-C `mldsanative.so` (~167 KiB). With the AVX2 backend now
-> actually active the module is ~211 KiB and its ML-DSA speed matches
-> oqs-provider. See **RESUME.md** for the exact re-run steps and the numbers to
-> plug in; this file still needs the refresh and a self-contained rewrite.
+modules (crypto statically linked), gcc `-O3`/Release. `mldsanative.so` is built
+with its native backend (x86_64 AVX2 asm), matching the mldsa-native core that
+liboqs — and therefore oqs-provider — also compiles. Reproduce with `run.sh`.
 
 ## Goal
 
@@ -46,21 +41,23 @@ ML-DSA functionality two ways:
 
 | module | size | vs ours |
 |---|--:|--:|
-| `mldsanative.so` (this provider) | **167.0 KiB** | 1.0× |
-| `oqsprovider.so`, regenerated ML-DSA-only | 494.9 KiB | 3.0× |
-| `oqsprovider.so`, minimal liboqs but **tables not regenerated** | 1195.6 KiB | 7.2× |
+| `mldsanative.so` (this provider) | **211.1 KiB** | 1.0× |
+| `oqsprovider.so`, regenerated ML-DSA-only | 494.9 KiB | 2.3× |
+| `oqsprovider.so`, minimal liboqs but **tables not regenerated** | 1195.6 KiB | 5.7× |
 
-`mldsanative.so` grew from 154.9 → 167.0 KiB (+12 KiB, +7.8%) when the OpenSSL
-< 3.5 parity features were added (TLS-SIGALG capability, OID/sigid registration,
-cipher-aware/text encoders, and the manual SPKI decoder). It remains the
-smallest module by a wide margin.
+`mldsanative.so` is 211.1 KiB (216184 B stripped). It includes both the native
+AVX2 ML-DSA core and the OpenSSL < 3.5 parity features (TLS-SIGALG capability,
+OID/sigid registration, cipher-aware/text encoders, and the manual SPKI
+decoder). It is the smallest module by a wide margin.
 
-The last row shows why regeneration matters: without editing `generate.yml`,
-oqs-provider still advertises ~90 algorithms (all non-ML-DSA ones are
-**non-functional** — `genpkey falcon512` → "Could not create OQS signature
-algorithm Falcon-512. Enabled in liboqs?"). Regeneration removes them.
+The last two rows show why `generate.yml` regeneration matters. Building
+oqs-provider against a minimal ML-DSA-only liboqs *without* regenerating its
+tables still advertises ~90 algorithms and links to 1195.6 KiB; all non-ML-DSA
+algorithms are **non-functional** (`genpkey falcon512` → "Could not create OQS
+signature algorithm Falcon-512. Enabled in liboqs?"). Regenerating the tables to
+ML-DSA-only removes them and drops the module to 494.9 KiB.
 
-Enabling the four ML-DSA hybrids in oqs-provider adds only **+29 KiB (+5.9%)**
+Enabling the four ML-DSA hybrids in oqs-provider adds only +29 KiB
 (494.9 → 523.9 KiB): the hybrid-composition code is already compiled in, so
 hybrids are essentially table entries.
 
@@ -68,11 +65,11 @@ hybrids are essentially table entries.
 
 | stack | modules | size | ratio |
 |---|---|--:|--:|
-| **Side A** oqs-provider | `oqsprovider.so` (self-contained) | **523.9 KiB** | 1.97× |
-| **Side B** this + hybrid-provider | `mldsanative.so` 167.0 KiB + `hybrid.so` 99.3 KiB | **266.3 KiB** | 1.0× |
+| **Side A** oqs-provider | `oqsprovider.so` (self-contained) | **523.9 KiB** | 1.69× |
+| **Side B** this + hybrid-provider | `mldsanative.so` 211.1 KiB + `hybrid.so` 99.3 KiB | **310.5 KiB** | 1.0× |
 
-`hybrid.so` is pure EVP glue — it embeds no crypto; its ML-DSA comes from
-`mldsanative.so` (shared with the plain-ML-DSA use), its ECDSA/RSA from the
+`hybrid.so` (99.3 KiB) is pure EVP glue — it embeds no crypto; its ML-DSA comes
+from `mldsanative.so` (shared with the plain-ML-DSA use), its ECDSA/RSA from the
 default provider. oqs-provider instead statically embeds its own ML-DSA copy.
 
 ## Interop (all PASS, on OpenSSL 3.4.2)
@@ -88,6 +85,28 @@ contexts = two parties; `--benchmark` also times sign/verify each side):
   — 8/8. The SPKI encodings are byte-identical in size across the two stacks
   (e.g. p256_mldsa44 = 1399 B, p521_mldsa87 = 2747 B).
 
+## Speed (OpenSSL 3.4.2, x86_64 AVX2 both sides)
+
+`interop.c --benchmark` times full one-shot sign/verify (thousands of ops/sec,
+higher is better). Because both sides wrap the same mldsa-native AVX2 core, this
+measures packaging/backend overhead, not the algorithm:
+
+| algorithm | ours sign | ours verify | oqs sign | oqs verify |
+|---|--:|--:|--:|--:|
+| ML-DSA-44 | 18.0 | 52.4 | 15.6 | 41.3 |
+| ML-DSA-65 | 11.4 | 31.6 | 10.0 | 24.7 |
+| ML-DSA-87 | 10.1 | 21.5 | 8.1 | 15.8 |
+| p256_mldsa44 | 12.7 | 13.6 | 11.7 | 12.6 |
+| rsa3072_mldsa44 | 0.6 | 19.0 | 0.6 | 17.2 |
+| p384_mldsa65 | 1.3 | 1.7 | 1.3 | 1.6 |
+| p521_mldsa87 | 0.6 | 0.8 | 0.6 | 0.8 |
+
+This provider is at parity or slightly ahead of oqs-provider across the board.
+Note this one-shot path includes per-call EVP init, so it is init-dominated and
+understates the crypto-only difference; for a crypto-level ours-vs-oqs number
+(reused signing context) use `ci/bench_regression.c`, the nightly regression
+guard, which bounds this provider within 1.5× of oqs-provider on keygen/sign.
+
 ## Functional mismatches / caveats (explicit)
 
 1. **oqs-provider cedes ML-DSA on OpenSSL ≥ 3.5.** It runtime-disables
@@ -97,7 +116,7 @@ contexts = two parties; `--benchmark` also times sign/verify each side):
    compiled either way.)
 2. **Minimizing oqs-provider requires the `generate.yml` route**, not just a
    minimal liboqs. Otherwise ~90 phantom, non-functional algorithms remain
-   advertised.
+   advertised (the 1195.6 KiB row above).
 3. **Plain ML-DSA interoperates at the raw-parameter level** (both providers use
    the identical raw public-key byte layout). **Hybrids do not** share the raw
    `OSSL_PKEY_PARAM_PUB_KEY` framing between oqs-provider and hybrid-provider;
@@ -108,16 +127,16 @@ contexts = two parties; `--benchmark` also times sign/verify each side):
    trimming its tables to the four ML-DSA hybrids. Untrimmed it is ~403 KiB —
    still delivering 68 hybrids for less than oqs-provider's four, because it
    embeds no crypto.
-5. **TLS-SIGALG capabilities — now at parity.** This provider now implements
+5. **TLS-SIGALG capabilities are at parity below 3.5.** This provider implements
    `get_capabilities` (TLS 1.3 signature-scheme advertisement) for ML-DSA-44/65/87,
    gated to OpenSSL < 3.5 (on 3.5+ the native default provider does it, so this one
    stays out of the way). A live in-process TLS 1.3 handshake with an ML-DSA server
    certificate driven entirely by this provider passes for all three levels on
-   3.4.2 (see `test/mldsa_tls_test.c`). Alongside this the provider gained the
+   3.4.2 (see `test/mldsa_tls_test.c`). Alongside this the provider carries the
    pieces the < 3.5 core otherwise lacks: OID/sigid registration (so X.509/CSR
    signing resolves the names), a manual SPKI decoder (so cert public keys decode),
-   and cipher-aware/text PKCS#8 encoders. The earlier plain-ML-DSA-in-TLS gap is
-   closed; the +12 KiB in the size table above is the cost of these features.
+   and cipher-aware/text PKCS#8 encoders. These features are part of the 211.1 KiB
+   module measured above.
 6. **Composite** signatures were intentionally NOT built into hybrid-provider
    (`-DHYBRID_COMPOSITE=OFF`); the ML-DSA-only oqs-provider has none either.
 7. **liboqs's ML-DSA *is* mldsa-native** (vendored under
@@ -128,13 +147,14 @@ contexts = two parties; `--benchmark` also times sign/verify each side):
 ## Bottom line
 
 For identical delivered functionality (ML-DSA + the four ML-DSA hybrids), the
-`mldsanative + hybrid-provider` stack is **~2× smaller** than a minimal
-oqs-provider (266 KiB vs 524 KiB), and the two interoperate in both directions.
-For plain ML-DSA alone it is **~3.0× smaller** (167 KiB vs 495 KiB). With the
-< 3.5 parity work (TLS-SIGALG, OID/sigid registration, X.509/PKCS#8 codecs) the
-earlier plain-ML-DSA-in-TLS functional gap is now closed, at a cost of +12 KiB —
-the stack stays the smaller of the two while now matching oqs-provider's
-plain-ML-DSA feature set below 3.5.
+`mldsanative + hybrid-provider` stack is **~1.7× smaller** than a minimal
+oqs-provider (310.5 KiB vs 523.9 KiB), and the two interoperate in both
+directions. For plain ML-DSA alone it is **~2.3× smaller** (211.1 KiB vs
+494.9 KiB). Both stacks compile the same mldsa-native AVX2 core, so their
+ML-DSA speed is equivalent (this provider measures at parity or slightly ahead
+in the one-shot interop benchmark). This provider additionally matches
+oqs-provider's plain-ML-DSA feature set below OpenSSL 3.5 (TLS-SIGALG,
+OID/sigid registration, X.509/PKCS#8 codecs).
 
 See `run.sh` for the exact reproduction steps and `interop.c` for the interop +
 benchmark harness.

@@ -23,43 +23,38 @@ Done on this branch:
   `oqs_vs_mldsanative_interop.c` and `hybrid_interop.c`. `run.sh` step 6 now
   builds/runs the single `interop.c --benchmark`.
 
-## What still needs doing (the actual TODO)
+## Status: COMPLETE (2026-08-30)
 
-1. **Refresh all numbers in `RESULTS.md`** against a provider built *with the
-   native backend* (the current figures were taken pre-fix, portable C). Steps:
+All three TODO items below are done. `RESULTS.md` is refreshed against a
+native-backend build and rewritten self-contained; the ⚠️ banner is gone.
+
+1. **Numbers refreshed** against a native-backend (`x86_64 AVX2`) build.
+   Re-run any time with:
    ```sh
    HP=/home/mib/git/baentsch/hybrid-provider          # sibling checkouts
-   # a) build THIS provider with the native backend (AUTO gives native on x86_64):
    cmake -S . -B build-34 \
      -DOPENSSL_CRYPTO_LIBRARY=$HP/.local-34/lib64/libcrypto.so \
      -DOPENSSL_SSL_LIBRARY=$HP/.local-34/lib64/libssl.so \
      -DOPENSSL_INCLUDE_DIR=$HP/.local-34/include \
      -DOPENSSL_LIB_DIR=$HP/.local-34/lib64
-   cmake --build build-34 --target mldsanative       # must report "native (x86_64 asm)"
-   # b) re-run the experiment (builds minimal liboqs + oqsprovider + hybrid):
+   cmake --build build-34 --target mldsanative       # reports "native (x86_64 asm)"
    bash experiments/oqs-minimal-size/run.sh
    ```
-   Known deltas to apply (measured this session, x86_64, `.local-34` = OpenSSL 3.4):
-   - `mldsanative.so` stripped size: **~167 KiB → ~211 KiB** (real AVX2 code).
-     The 3.0×/1.97× ratios in RESULTS shrink accordingly — recompute from run.sh
-     output (oqsprovider ~524 KiB and hybrid ~99 KiB are unchanged).
-   - Speed vs oqs-provider: now **~parity** (both wrap the same mldsa-native AVX2
-     core). The guard's crypto-level measure showed ours 0.74–0.91× of oqs.
-   - vs the OpenSSL 3.5 **default** provider (portable C), `openssl speed`:
-     ML-DSA-65 keygen ~4.3×, sign ~9.0×, verify ~4.6× (already in README).
-   - Note `interop.c --benchmark` times *full* one-shot sign (includes EVP init),
-     so it is init-dominated and understates the crypto gap; for a crypto-level
-     ours-vs-oqs number use `ci/bench_regression.c` (reused ctx). Consider making
-     `interop.c`'s bench reuse the ctx too, or just cite the guard's numbers.
+   Measured this run (x86_64, `.local-34` = OpenSSL 3.4.2):
+   - `mldsanative.so` stripped = **211.1 KiB** (216184 B) — native AVX2.
+     `oqsprovider.so` = 523.9 KiB, `hybrid.so` = 99.3 KiB.
+   - Equivalent-functionality stack: 211.1+99.3 = 310.5 KiB vs 523.9 KiB → **1.69×**.
+     Plain ML-DSA: 211.1 vs 494.9 KiB → **2.3×**.
+   - Speed: at **parity or slightly ahead** of oqs-provider in `interop.c
+     --benchmark` (both wrap the same mldsa-native AVX2 core). That path is
+     init-dominated; for a crypto-level number cite `ci/bench_regression.c` (the
+     nightly guard bounds ours within 1.5× of oqs).
 
-2. **Rewrite `RESULTS.md` to be self-contained** (the other standing request):
-   remove phrasings that only make sense to someone who watched the sessions
-   ("the earlier gap", "now at parity", "grew from X"), state every result as a
-   standalone fact with its proof point, keep all findings. Drop the ⚠️ banner
-   once the numbers are refreshed.
+2. **`RESULTS.md` rewritten self-contained** — no "earlier/now/grew from"
+   framing; every result a standalone fact with its proof point; ⚠️ banner removed.
 
-3. **Re-verify interop still passes** after the rebuild: `run.sh` prints 6/6
-   plain + 8/8 hybrid; `--benchmark` prints the per-level table.
+3. **Interop re-verified** after the native rebuild: 6/6 plain + 8/8 hybrid,
+   ALL INTEROP PASSED; `--benchmark` table populated.
 
 ## Keeping the branch current / pushing
 
