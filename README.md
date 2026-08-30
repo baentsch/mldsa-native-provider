@@ -221,6 +221,15 @@ checkout <commit>`), rebuild, and commit the new pin.
 The active backend is reported at configure time and in
 `openssl list -providers -verbose -provider mldsanative` (the `build info` line).
 
+> **x86_64 runtime requirement.** The x86_64 asm backend (AUTO/NATIVE) is built
+> with `-mavx2 -mbmi2`; mldsa-native gates both its AVX2 assembly and the C that
+> dispatches to it on `__AVX2__`, so these flags are what actually engage the
+> native path (without them the build silently falls back to portable C — see the
+> `native-backend` fix). Consequently an x86_64 native build **requires an
+> AVX2-capable CPU at run time**. Build with `-DMLDSA_NATIVE_BACKEND=PORTABLE`
+> for a universal x86_64 binary. AArch64 uses NEON (ARMv8-A baseline) and needs
+> no extra flags.
+
 ## Selecting which ML-DSA runs (default vs this provider)
 
 There is **no cede-to-default logic**: when both providers are loaded they both
@@ -241,20 +250,21 @@ MODULE_DIR=$PWD/build  test/benchmark.sh
 ```
 
 Because mldsa-native is optimized for **specific CPUs** (x86_64 AVX2, AArch64)
-while the default provider's ML-DSA is **portable C everywhere**, the speed-up
-is platform-specific — measure on your target hardware. As a vivid illustration,
-the CI benchmark (this provider vs the default provider, same OpenSSL 3.5) gives
-very different ratios per architecture:
+while the default provider's ML-DSA is **portable C everywhere**, the speed-up is
+platform-specific — measure on your target hardware. With the asm backend
+actually engaged, both architectures see a large win over the portable-C default
+(measured with `openssl speed` on OpenSSL 3.5, this provider vs the default):
 
-| operation | x86_64 (AMD EPYC 7763, AVX2) | aarch64 (Neoverse-N2) |
+| operation | x86_64 (AVX2) | aarch64 (Neoverse-N2, NEON) |
 |---|--:|--:|
-| ML-DSA-65 keygen | ~1.5× | ~3.2× |
-| ML-DSA-65 sign   | ~2.0× | ~6.8× |
-| ML-DSA-65 verify | ~1.5× | ~3.6× |
+| ML-DSA-65 keygen | ~4.3× | ~3.2× |
+| ML-DSA-65 sign   | ~9.0× | ~6.8× |
+| ML-DSA-65 verify | ~4.6× | ~3.6× |
 
-Same code, same algorithm — the AArch64 backend simply wins more over portable
-C on that core. Don't carry one architecture's number to another. See the
-"Performance and platform targeting" section of [USAGE.md](USAGE.md) for details
+Signing gains the most (it is the most SHAKE/rejection-heavy), and the exact
+ratios are CPU-specific — CI prints the per-architecture numbers on every run;
+don't carry one machine's number to another. See the "Performance and platform
+targeting" section of [USAGE.md](USAGE.md) for details
 and caveats.
 
 ## Test
