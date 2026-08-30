@@ -87,25 +87,42 @@ contexts = two parties; `--benchmark` also times sign/verify each side):
 
 ## Speed (OpenSSL 3.4.2, x86_64 AVX2 both sides)
 
-`interop.c --benchmark` times full one-shot sign/verify (thousands of ops/sec,
-higher is better). Because both sides wrap the same mldsa-native AVX2 core, this
-measures packaging/backend overhead, not the algorithm:
+`interop.c --benchmark` times full one-shot sign/verify on each side. Each figure
+is the **best of 5 measurement windows of ≥ 1 s each** — every window runs
+thousands of operations back-to-back, and taking the best window discards
+transient glitches (scheduler preemption, turbo ramp, background load) instead of
+averaging them in, so the numbers are stable across runs. Throughput is in
+thousands of ops/sec (higher is better); the ratio column is ours ÷ oqs
+(> 1.0 = this provider faster).
 
-| algorithm | ours sign | ours verify | oqs sign | oqs verify |
-|---|--:|--:|--:|--:|
-| ML-DSA-44 | 18.0 | 52.4 | 15.6 | 41.3 |
-| ML-DSA-65 | 11.4 | 31.6 | 10.0 | 24.7 |
-| ML-DSA-87 | 10.1 | 21.5 | 8.1 | 15.8 |
-| p256_mldsa44 | 12.7 | 13.6 | 11.7 | 12.6 |
-| rsa3072_mldsa44 | 0.6 | 19.0 | 0.6 | 17.2 |
-| p384_mldsa65 | 1.3 | 1.7 | 1.3 | 1.6 |
-| p521_mldsa87 | 0.6 | 0.8 | 0.6 | 0.8 |
+### Plain ML-DSA
 
-This provider is at parity or slightly ahead of oqs-provider across the board.
-Note this one-shot path includes per-call EVP init, so it is init-dominated and
-understates the crypto-only difference; for a crypto-level ours-vs-oqs number
-(reused signing context) use `ci/bench_regression.c`, the nightly regression
-guard, which bounds this provider within 1.5× of oqs-provider on keygen/sign.
+| algorithm | ours sign / verify | oqs sign / verify | ratio sign / verify |
+|---|--:|--:|--:|
+| ML-DSA-44 | 18.0 / 51.9 | 15.4 / 41.1 | **1.17× / 1.26×** |
+| ML-DSA-65 | 11.1 / 31.3 | 9.8 / 24.7 | **1.13× / 1.27×** |
+| ML-DSA-87 | 9.6 / 20.6 | 7.8 / 15.2 | **1.24× / 1.35×** |
+
+### ML-DSA hybrids
+
+| algorithm | ours sign / verify | oqs sign / verify | ratio sign / verify |
+|---|--:|--:|--:|
+| p256_mldsa44 | 12.5 / 13.1 | 11.4 / 12.5 | 1.10× / 1.05× |
+| rsa3072_mldsa44 | 0.6 / 18.4 | 0.6 / 17.1 | 1.00× / 1.08× |
+| p384_mldsa65 | 1.2 / 1.6 | 1.2 / 1.6 | 1.01× / 1.02× |
+| p521_mldsa87 | 0.6 / 0.8 | 0.6 / 0.7 | 1.01× / 1.01× |
+
+On plain ML-DSA this provider is **1.13–1.35× faster** than the minimal
+oqs-provider; on the hybrids the two are within ~10% (there the classical half —
+ECDSA/RSA from the default provider on both sides — dominates the cost, so the
+ML-DSA path is a smaller fraction of the total). Both stacks compile the same
+mldsa-native AVX2 core, so this reflects provider/packaging overhead on the
+identical algorithm, not an algorithmic difference.
+
+This one-shot path includes per-call EVP init; for a crypto-level ours-vs-oqs
+number with a reused signing context, `ci/bench_regression.c` (the nightly
+regression guard) bounds this provider within 1.5× of oqs-provider on
+keygen/sign.
 
 ## Functional mismatches / caveats (explicit)
 
@@ -122,8 +139,8 @@ guard, which bounds this provider within 1.5× of oqs-provider on keygen/sign.
    `OSSL_PKEY_PARAM_PUB_KEY` framing between oqs-provider and hybrid-provider;
    they interoperate at the **wire format** (SPKI/PKCS8 DER), which *is*
    byte-compatible. This is a representation difference, not a wire difference.
-4. **hybrid-provider serves a superset by default.** Unmodified (composite OFF)
-   it serves 26 signature + 42 KEM hybrids as glue; the 99.3 KiB figure is after
+4. **hybrid-provider serves a superset by default.** Unmodified it serves 26
+   signature + 42 KEM hybrids as glue; the 99.3 KiB figure is after
    trimming its tables to the four ML-DSA hybrids. Untrimmed it is ~403 KiB —
    still delivering 68 hybrids for less than oqs-provider's four, because it
    embeds no crypto.
@@ -137,9 +154,7 @@ guard, which bounds this provider within 1.5× of oqs-provider on keygen/sign.
    signing resolves the names), a manual SPKI decoder (so cert public keys decode),
    and cipher-aware/text PKCS#8 encoders. These features are part of the 211.1 KiB
    module measured above.
-6. **Composite** signatures were intentionally NOT built into hybrid-provider
-   (`-DHYBRID_COMPOSITE=OFF`); the ML-DSA-only oqs-provider has none either.
-7. **liboqs's ML-DSA *is* mldsa-native** (vendored under
+6. **liboqs's ML-DSA *is* mldsa-native** (vendored under
    `src/sig/ml_dsa/mldsa-native_*`), shipped un-deduplicated per level/backend —
    so the underlying algorithm code is identical; the size difference is
    packaging + library core + provider glue.
@@ -150,11 +165,11 @@ For identical delivered functionality (ML-DSA + the four ML-DSA hybrids), the
 `mldsanative + hybrid-provider` stack is **~1.7× smaller** than a minimal
 oqs-provider (310.5 KiB vs 523.9 KiB), and the two interoperate in both
 directions. For plain ML-DSA alone it is **~2.3× smaller** (211.1 KiB vs
-494.9 KiB). Both stacks compile the same mldsa-native AVX2 core, so their
-ML-DSA speed is equivalent (this provider measures at parity or slightly ahead
-in the one-shot interop benchmark). This provider additionally matches
-oqs-provider's plain-ML-DSA feature set below OpenSSL 3.5 (TLS-SIGALG,
-OID/sigid registration, X.509/PKCS#8 codecs).
+494.9 KiB). Both stacks compile the same mldsa-native AVX2 core; on plain ML-DSA
+this provider is also **1.13–1.35× faster** in the one-shot interop benchmark
+(and within ~10% on the hybrids, where the classical half dominates). This
+provider additionally matches oqs-provider's plain-ML-DSA feature set below
+OpenSSL 3.5 (TLS-SIGALG, OID/sigid registration, X.509/PKCS#8 codecs).
 
 See `run.sh` for the exact reproduction steps and `interop.c` for the interop +
 benchmark harness.

@@ -238,22 +238,40 @@ static double now_s(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
-/* Run |op| back-to-back for at least MIN_S seconds; return ops/second. */
-#define MIN_S 0.30
-static double rate(int (*op)(void *), void *arg)
+/* One measurement window: run |op| back-to-back for >= WIN_S s, ops/second. */
+#define WIN_S    1.0    /* per-window duration                              */
+#define REPEATS  5      /* windows per measurement; we keep the best one    */
+static double one_window(int (*op)(void *), void *arg)
 {
     double t0, t1;
     long n = 0;
 
-    /* warm up once (JIT-free C, but primes caches / lazy fetches) */
-    if (!op(arg))
-        return 0.0;
     t0 = now_s();
     do {
         if (!op(arg)) return 0.0;
         n++;
-    } while ((t1 = now_s()) - t0 < MIN_S);
+    } while ((t1 = now_s()) - t0 < WIN_S);
     return (double)n / (t1 - t0);
+}
+
+/* Best of REPEATS windows (each >= WIN_S s, i.e. thousands of ops). Reporting
+ * the best window discards transient glitches (scheduler preemption, turbo
+ * ramp, background load) rather than averaging them in: the fastest window is
+ * the one least disturbed by contention, so it best reflects the steady-state
+ * cost of the operation itself. */
+static double rate(int (*op)(void *), void *arg)
+{
+    double best = 0.0;
+    int i;
+
+    /* warm up once (JIT-free C, but primes caches / lazy fetches) */
+    if (!op(arg))
+        return 0.0;
+    for (i = 0; i < REPEATS; i++) {
+        double r = one_window(op, arg);
+        if (r > best) best = r;
+    }
+    return best;
 }
 
 struct signarg { OSSL_LIB_CTX *c; EVP_PKEY *k; };
@@ -324,10 +342,10 @@ int main(int argc, char **argv)
     printf(fails ? "  %d INTEROP FAILURE(S)\n" : "  ALL INTEROP PASSED\n", fails);
 
     if (do_bench) {
-        printf("\nBenchmark (sign / verify, thousands of ops per second; "
-               "higher is better):\n");
-        printf("  %-16s %-28s %-28s\n", "algorithm",
-               "ours (mldsanative/hybrid)", "oqs-provider");
+        printf("\nBenchmark (sign / verify, thousands of ops per second, best of "
+               "%d windows of >= %.0fs each; higher is better).\n", REPEATS, WIN_S);
+        printf("  %-16s %-24s %-24s %-15s\n", "algorithm",
+               "ours (mldsanative/hybrid)", "oqs-provider", "ratio ours/oqs");
         for (i = 0; i < NROWS; i++) {
             const struct row *r = &rows[i];
             double as = 0, av = 0, bs = 0, bv = 0;
@@ -335,10 +353,14 @@ int main(int argc, char **argv)
             int okb = bench_party(oqs, r->name_b, &bs, &bv);
 
             printf("  %-16s ", r->name_a);
-            if (oka) printf("sign %7.1f  verify %7.1f    ", as / 1e3, av / 1e3);
-            else     printf("%-28s", "(unavailable)");
-            if (okb) printf("sign %7.1f  verify %7.1f\n", bs / 1e3, bv / 1e3);
-            else     printf("%s\n", "(unavailable)");
+            if (oka) printf("sign %6.1f verify %6.1f   ", as / 1e3, av / 1e3);
+            else     printf("%-24s ", "(unavailable)");
+            if (okb) printf("sign %6.1f verify %6.1f   ", bs / 1e3, bv / 1e3);
+            else     printf("%-24s ", "(unavailable)");
+            if (oka && okb && bs > 0 && bv > 0)
+                printf("sign %4.2fx verify %4.2fx\n", as / bs, av / bv);
+            else
+                printf("\n");
         }
         printf("  (same ML-DSA core both sides -- liboqs's ML-DSA *is* "
                "mldsa-native; this measures packaging/backend, not the algorithm)\n");
