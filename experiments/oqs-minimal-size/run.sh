@@ -79,8 +79,8 @@ for m in mldsanative.so oqsprovider.so hybrid.so; do
   printf "  %-16s %s\n" "$m" "$(sz "$WORK/$m.stripped")"
 done
 
-echo "### 6. interop (OpenSSL $("$OSSL/bin/openssl" version | awk '{print $2}'))"
-cc -O2 "$HERE/oqs_vs_mldsanative_interop.c" -I"$OSSL/include" -L"$LIB" -lcrypto -o "$WORK/plain_interop"
-cc -O2 "$HERE/hybrid_interop.c"            -I"$OSSL/include" -L"$LIB" -lcrypto -o "$WORK/hybrid_interop"
-OPENSSL_MODULES="$MODS" "$WORK/plain_interop"
-OPENSSL_MODULES="$MODS" "$WORK/hybrid_interop"
+echo "### 6. interop + benchmark (OpenSSL $("$OSSL/bin/openssl" version | awk '{print $2}'))"
+# One table-driven program covers both plain (RAW-parameter) and hybrid (SPKI
+# DER) interop, then --benchmark times sign/verify on each side.
+cc -O2 "$HERE/interop.c" -I"$OSSL/include" -L"$LIB" -lcrypto -o "$WORK/interop"
+OPENSSL_MODULES="$MODS" "$WORK/interop" --benchmark

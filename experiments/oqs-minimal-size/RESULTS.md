@@ -4,6 +4,13 @@
 part of the shipped provider. All numbers are x86_64, `strip -s`, self-contained
 modules (crypto statically linked), gcc `-O3`/Release.
 
+> ⚠️ **Numbers pending refresh.** The size/speed figures below were taken with a
+> provider built *before* the native-backend fix (which landed on `main`), i.e.
+> against a portable-C `mldsanative.so` (~167 KiB). With the AVX2 backend now
+> actually active the module is ~211 KiB and its ML-DSA speed matches
+> oqs-provider. See **RESUME.md** for the exact re-run steps and the numbers to
+> plug in; this file still needs the refresh and a self-contained rewrite.
+
 ## Goal
 
 An apples-to-apples comparison of the code that must ship to deliver the same
@@ -70,13 +77,16 @@ default provider. oqs-provider instead statically embeds its own ML-DSA copy.
 
 ## Interop (all PASS, on OpenSSL 3.4.2)
 
-- **Plain ML-DSA**, `mldsanative` ↔ `oqsprovider`, raw-pubkey exchange,
-  cross sign/verify both ways, all three levels — 6/6
-  (`oqs_vs_mldsanative_interop.c`).
-- **Hybrids**, (`mldsanative`+`hybrid-provider`) ↔ `oqsprovider`, SubjectPublic-
-  KeyInfo DER exchange, cross sign/verify both ways, all four hybrids — 8/8
-  (`hybrid_interop.c`). The SPKI encodings are byte-identical in size across the
-  two stacks (e.g. p256_mldsa44 = 1399 B, p521_mldsa87 = 2747 B).
+Both cases are driven by a single table-driven program, `interop.c` (two library
+contexts = two parties; `--benchmark` also times sign/verify each side):
+
+- **Plain ML-DSA**, `mldsanative` ↔ `oqsprovider`, **raw-parameter** exchange
+  (`OSSL_PKEY_PARAM_PUB_KEY`), cross sign/verify both ways, all three levels — 6/6.
+- **Hybrids**, (`mldsanative`+`hybrid-provider`) ↔ `oqsprovider`, **SubjectPublic-
+  KeyInfo DER** exchange (the two hybrid stacks do not share a raw-parameter
+  layout, but their wire format is byte-compatible), both ways, all four hybrids
+  — 8/8. The SPKI encodings are byte-identical in size across the two stacks
+  (e.g. p256_mldsa44 = 1399 B, p521_mldsa87 = 2747 B).
 
 ## Functional mismatches / caveats (explicit)
 
@@ -126,4 +136,5 @@ earlier plain-ML-DSA-in-TLS functional gap is now closed, at a cost of +12 KiB �
 the stack stays the smaller of the two while now matching oqs-provider's
 plain-ML-DSA feature set below 3.5.
 
-See `run.sh` for the exact reproduction steps and `*.c` for the interop tests.
+See `run.sh` for the exact reproduction steps and `interop.c` for the interop +
+benchmark harness.
