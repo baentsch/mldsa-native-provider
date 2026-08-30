@@ -51,9 +51,8 @@ ML-DSA functionality two ways:
   its `generate.yml` reduced so it serves exactly ML-DSA + the four ML-DSA
   concatenation hybrids.
 - **Side B — this provider + hybrid-provider**: `mldsanative.so` delivers
-  ML-DSA; `hybrid-provider` (composite OFF, tables trimmed to the same four
-  hybrids) delivers the hybrids, sourcing its ML-DSA component **from
-  mldsanative**.
+  ML-DSA; `hybrid-provider` (tables trimmed to the same four hybrids) delivers
+  the hybrids, sourcing its ML-DSA component **from mldsanative**.
 
 ...and to confirm the two stacks interoperate.
 
@@ -67,9 +66,11 @@ ML-DSA functionality two ways:
 - **oqs-provider**: `generate.yml` edited to `kems: []` and `sigs:` = the ML-DSA
   family only, then `python3 oqs-template/generate.py`, then built against the
   minimal liboqs (static-linked into `oqsprovider.so`).
-- **hybrid-provider**: `-DHYBRID_COMPOSITE=OFF`; for the fair size its X-macro
-  tables (`HYBRID_SIG_LIST`/`HYBRID_KEM_LIST` in `hybrid_prov.h`) were trimmed to
-  the four ML-DSA hybrids and no KEM hybrids.
+- **hybrid-provider**: built with `-DHYBRID_COMPOSITE=OFF` (the option defaults
+  to ON) so `hybrid.so` carries only the concatenation hybrids that oqs-provider
+  also serves — an apples-to-apples size baseline. Its X-macro tables
+  (`HYBRID_SIG_LIST`/`HYBRID_KEM_LIST` in `hybrid_prov.h`) were trimmed to the
+  four ML-DSA hybrids and no KEM hybrids.
 
 ## Binary sizes (stripped)
 
@@ -179,7 +180,7 @@ from the default provider on both sides) dominates the cost, so the ML-DSA
 component — where this provider's edge lives — is a small fraction of the total.
 The reused-context path is **not** shown for the hybrids: hybrid-provider does not
 implement the raw `OSSL_FUNC_SIGNATURE_SIGN_INIT`/`VERIFY_INIT` entry points, so
-`EVP_PKEY_sign_init` fails for its composite keys and only the `EVP_DigestSign`
+`EVP_PKEY_sign_init` fails for its hybrid keys and only the `EVP_DigestSign`
 one-shot path is usable. This is a hybrid-provider gap, not a general one — both
 this provider (for plain ML-DSA) and oqs-provider (for its hybrids) implement the
 raw path. See caveat 7.
@@ -226,7 +227,7 @@ provider glue over an identical algorithm, not an algorithmic difference.
    `DIGEST_SIGN` and registers `OSSL_FUNC_SIGNATURE_SIGN`/`VERIFY`, but omits
    `OSSL_FUNC_SIGNATURE_SIGN_INIT` and `VERIFY_INIT`. Without the `*_INIT`
    entry points `EVP_PKEY_sign_init()`/`EVP_PKEY_verify_init()` fail for its
-   composite keys, so the reused-context benchmark path cannot run on the
+   hybrid keys, so the reused-context benchmark path cannot run on the
    hybrids (only `EVP_DigestSign` works). Both this provider (plain ML-DSA) and
    oqs-provider (its hybrids) implement the raw path, so this is specific to
    hybrid-provider. Reported upstream (hybrid-provider#79); the two init

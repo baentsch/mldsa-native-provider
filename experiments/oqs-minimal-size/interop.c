@@ -419,8 +419,8 @@ int main(int argc, char **argv)
                REPEATS, WIN_S);
         for (i = 0; i < NROWS; i++) {
             /* The reused raw EVP_PKEY_sign/verify API is only uniformly served
-             * for plain ML-DSA; the hybrid composite exposes it on neither
-             * stack cleanly, so we only reuse-measure the plain rows. */
+             * for plain ML-DSA; the hybrids expose it on neither stack
+             * cleanly, so we only reuse-measure the plain rows. */
             int reuse = (strcmp(rows[i].kind, "plain") == 0);
             bench_party(ours, rows[i].name_a, reuse, &ob[i]);
             bench_party(oqs,  rows[i].name_b, reuse, &qb[i]);
