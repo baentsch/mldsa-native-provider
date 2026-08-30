@@ -20,6 +20,11 @@ signatures — and nothing else — on top of the
   ML-DSA or any other intermediate crypto API. The only OpenSSL crypto used is
   the DRBG (`RAND_bytes`), as the entropy source for key/seed generation.
 - **Signatures only — no KEM.**
+- **Usable end-to-end from OpenSSL 3.2**, not just 3.5: on cores that lack native
+  ML-DSA (&lt; 3.5) the provider also registers the ML-DSA OIDs/sigids, advertises
+  a TLS 1.3 signature-scheme (TLS-SIGALG) capability, and adds encrypted-PKCS#8 /
+  text encoders — so certificates, CSRs and TLS handshakes work. On 3.5+ it adds
+  none of this, deferring to the default provider.
 
 This differs from its siblings
 [hybrid-provider](https://github.com/baentsch/hybrid-provider) and
@@ -37,13 +42,15 @@ The three providers occupy deliberately different points in the design space:
 | Crypto source | **mldsa-native, pinned submodule, called directly** | **liboqs** (external library, its C API) | **none of its own** — delegates to other providers via EVP |
 | Abstraction layers | one: provider → mldsa-native function | two: provider → liboqs `OQS_SIG_*` → primitive | provider → EVP → whichever provider serves each half |
 | Runtime dependencies | just `libcrypto` | `libcrypto` **+ liboqs** | `libcrypto` **+ ≥1 other provider** present at run time |
-| OID / code-point handling | standard names/OIDs, no patching | runtime `OBJ_create`/code-point patching | inherits component identities |
+| OID / code-point handling | standard names/OIDs; `OBJ_create`/sigid + TLS-SIGALG **only on OpenSSL < 3.5** (idempotent, where the core lacks them), nothing on 3.5+ | runtime `OBJ_create`/code-point patching (always) | inherits component identities |
 | Hybrid / composite logic | none | some | the entire point |
 
 Structurally that makes this the *flat, single-purpose* member of the family:
-no algorithm registry, no external crypto library, no runtime composition, no
-OID patching — the provider is a thin, direct binding over one focused
-implementation.
+no algorithm registry, no external crypto library, no runtime composition — the
+provider is a thin, direct binding over one focused implementation. The only
+runtime registration it does is conditional: on OpenSSL < 3.5 (which lacks native
+ML-DSA) it registers the standard ML-DSA OIDs/sigids and a TLS-SIGALG capability
+so certificates and TLS work; on 3.5+ it adds nothing, deferring to the core.
 
 ### Code size
 
@@ -147,24 +154,34 @@ and, using **only this provider** for the ML-DSA operations, checks that each
 implementation's self-signed trust-anchor certificate verifies and that every
 private-key form they ship (`seed` / `expandedKey` / `both`) loads and signs.
 It currently passes against **7 implementations** (bc, botan, carl-redhound,
-openjdk, ossl35, safelogic, sanctum-secops) across all three levels. It
-self-skips without network access or on OpenSSL &lt; 3.5 (X.509 ML-DSA handling
-is a 3.5 libcrypto feature).
+openjdk, ossl35, safelogic, sanctum-secops) across all three levels — **117
+checks, on both OpenSSL 3.4 and 3.5**. Because this provider now supplies the
+X.509 machinery for ML-DSA below 3.5 (OID/sigid registration + SPKI/PKCS#8
+codecs), the test no longer needs a 3.5 core; it self-skips only without network
+access or if the provider cannot be loaded.
 
 ## OpenSSL version support
 
-| OpenSSL | provider builds | KAT | interop vs default | IETF cert interop |
-|---|:-:|:-:|:-:|:-:|
-| 3.2 – 3.4 | ✅ | ✅ | skipped¹ | skipped² |
-| 3.5+ | ✅ | ✅ | ✅ | ✅ |
+| OpenSSL | provider builds | KAT | X.509 / IETF cert interop | TLS 1.3 handshake | interop vs default |
+|---|:-:|:-:|:-:|:-:|:-:|
+| 3.2 – 3.4 | ✅ | ✅ | ✅ (via this provider) | ✅ (via this provider) | skipped¹ |
+| 3.5+ | ✅ | ✅ | ✅ | ✅ (via default) | ✅ |
 
 The provider itself only uses 3.0-era provider/EVP APIs, so it builds and its
 FIPS-204 KAT passes from **OpenSSL 3.2** on (a compat header supplies the few
 ML-DSA `OSSL_PARAM` name macros that were only added to the headers in 3.5).
-The things that genuinely need 3.5 are *comparisons/plumbing outside this
-provider*: ¹ the default provider gained ML-DSA in 3.5, so there is nothing to
-interop against before then; ² libcrypto's X.509 certificate machinery only
-understands ML-DSA from 3.5. Both tests self-skip below 3.5 rather than fail.
+
+Below 3.5 the default provider has no native ML-DSA, so this provider supplies
+the pieces libcrypto/libssl would otherwise get from it — **only on < 3.5**, to
+avoid duplicate registration on 3.5+: OID + signature-id registration (so
+X.509/CSR/cert verification resolves the algorithm), a TLS-SIGALG capability (so
+TLS 1.3 negotiates and uses ML-DSA), and cipher-aware/text PKCS#8 encoders. As a
+result X.509 certificates, the IETF cross-implementation cert interop, and live
+TLS 1.3 handshakes all work from **3.2** on. The one thing still gated to 3.5 is
+¹ *interop against the default provider* — before 3.5 there simply is no native
+ML-DSA to compare against, so that test self-skips. The `tls` test conversely
+self-skips on 3.5+, where the capability is intentionally inactive (the default
+provider advertises the schemes) and the handshake runs via the default.
 
 CI (`.github/workflows/ci.yml`) builds against the `openssl-3.2` and
 `openssl-3.5` branches on both **x86_64** and **aarch64** GitHub runners, runs
@@ -250,8 +267,12 @@ ctest --output-on-failure
 - `kat`          — FIPS 204 known-answer tests through the provider (EVP API).
 - `interop`      — parity / cross sign-verify / key-file round-trips against the
   default provider (self-skips on OpenSSL &lt; 3.5).
+- `tls`          — in-process TLS 1.3 handshake with an ML-DSA server certificate
+  driven by this provider's TLS-SIGALG capability, all three levels (runs on
+  OpenSSL &lt; 3.5; self-skips on 3.5+, where the default provider advertises the
+  schemes).
 - `ietf_interop` — cross-implementation interop against the IETF
-  pqc-certificates artifacts (self-skips without network or on &lt; 3.5).
+  pqc-certificates artifacts, from OpenSSL 3.2 on (self-skips without network).
 
 To use the provider from the CLI, point `OPENSSL_MODULES` at the build
 directory:
@@ -271,6 +292,7 @@ mldsa_native_keymgmt.c      keymgmt: seed/pub/priv import-export, keygen, params
 mldsa_native_sig.c          signature: pure ML-DSA sign/verify (+ context, KAT entropy)
 mldsa_native_encoder.c      SPKI + PKCS8 encoders (DER + PEM)
 mldsa_native_decoder.c      SPKI + PKCS8 decoders (DER; PEM via OpenSSL pem2der)
+                            (+ encrypted-PKCS8/text encoders & TLS-SIGALG on <3.5)
 mldsa_native_compat.h       OSSL_PARAM name shims for OpenSSL 3.2-3.4 headers
 mldsa_glue/                 multi-level wrapper + our config (MLD_CONFIG_FILE)
 third_party/mldsa-native/   mldsa-native, pinned git submodule (the crypto)
