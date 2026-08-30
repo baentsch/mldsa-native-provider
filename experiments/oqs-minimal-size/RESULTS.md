@@ -192,8 +192,9 @@ provider glue over an identical algorithm, not an algorithmic difference.
    composite keys, so the reused-context benchmark path cannot run on the
    hybrids (only `EVP_DigestSign` works). Both this provider (plain ML-DSA) and
    oqs-provider (its hybrids) implement the raw path, so this is specific to
-   hybrid-provider. Reported upstream for a fix; the two init functions can
-   delegate to the existing `hybrid_sig_digest_sign_init(..., mdname=NULL, ...)`.
+   hybrid-provider. Reported upstream (hybrid-provider#79); the two init
+   functions can delegate to the existing
+   `hybrid_sig_digest_sign_init(..., mdname=NULL, ...)`.
 
 ## Bottom line
 
