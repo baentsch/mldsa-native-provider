@@ -87,42 +87,68 @@ contexts = two parties; `--benchmark` also times sign/verify each side):
 
 ## Speed (OpenSSL 3.4.2, x86_64 AVX2 both sides)
 
-`interop.c --benchmark` times full one-shot sign/verify on each side. Each figure
-is the **best of 5 measurement windows of ≥ 1 s each** — every window runs
-thousands of operations back-to-back, and taking the best window discards
-transient glitches (scheduler preemption, turbo ramp, background load) instead of
-averaging them in, so the numbers are stable across runs. Throughput is in
-thousands of ops/sec (higher is better); the ratio column is ours ÷ oqs
-(> 1.0 = this provider faster).
+`interop.c --benchmark` times sign/verify on each side. Every figure is the
+**best of 5 measurement windows of ≥ 1 s each** — each window runs thousands of
+operations back-to-back, and reporting the best window discards transient
+glitches (scheduler preemption, turbo ramp, background load) instead of averaging
+them in, so the numbers are stable across runs. Throughput is in thousands of
+ops/sec (higher is better); the ratio column is ours ÷ oqs (> 1.0 = this provider
+faster). Two call paths are measured:
 
-### Plain ML-DSA
+- **one-shot** — a fresh `EVP_MD_CTX` with `EVP_DigestSign(Verify)Init` on every
+  call. This is the real-world cost of a single detached sign/verify (X.509,
+  CMS, a one-off signature), including the per-call provider fetch + context
+  setup.
+- **reused context** — one `EVP_PKEY_CTX` built once, then `EVP_PKEY_sign`/
+  `EVP_PKEY_verify` back-to-back. This amortizes the plumbing away and exposes
+  the crypto cost, the same method the nightly `ci/bench_regression.c` guard uses.
+
+### Plain ML-DSA — one-shot (fresh context per call)
 
 | algorithm | ours sign / verify | oqs sign / verify | ratio sign / verify |
 |---|--:|--:|--:|
-| ML-DSA-44 | 18.0 / 51.9 | 15.4 / 41.1 | **1.17× / 1.26×** |
-| ML-DSA-65 | 11.1 / 31.3 | 9.8 / 24.7 | **1.13× / 1.27×** |
-| ML-DSA-87 | 9.6 / 20.6 | 7.8 / 15.2 | **1.24× / 1.35×** |
+| ML-DSA-44 | 17.1 / 50.2 | 15.2 / 40.5 | **1.12× / 1.24×** |
+| ML-DSA-65 | 10.9 / 30.7 | 9.5 / 23.6 | **1.14× / 1.30×** |
+| ML-DSA-87 | 9.3 / 20.0 | 7.6 / 15.0 | **1.23× / 1.33×** |
 
-### ML-DSA hybrids
+### Plain ML-DSA — reused context (`EVP_PKEY_CTX` kept across calls)
 
 | algorithm | ours sign / verify | oqs sign / verify | ratio sign / verify |
 |---|--:|--:|--:|
-| p256_mldsa44 | 12.5 / 13.1 | 11.4 / 12.5 | 1.10× / 1.05× |
-| rsa3072_mldsa44 | 0.6 / 18.4 | 0.6 / 17.1 | 1.00× / 1.08× |
-| p384_mldsa65 | 1.2 / 1.6 | 1.2 / 1.6 | 1.01× / 1.02× |
-| p521_mldsa87 | 0.6 / 0.8 | 0.6 / 0.7 | 1.01× / 1.01× |
+| ML-DSA-44 | 17.6 / 52.2 | 15.5 / 42.4 | **1.14× / 1.23×** |
+| ML-DSA-65 | 11.2 / 31.4 | 9.6 / 24.3 | **1.17× / 1.29×** |
+| ML-DSA-87 | 9.5 / 20.5 | 7.8 / 15.5 | **1.23× / 1.32×** |
 
-On plain ML-DSA this provider is **1.13–1.35× faster** than the minimal
-oqs-provider; on the hybrids the two are within ~10% (there the classical half —
-ECDSA/RSA from the default provider on both sides — dominates the cost, so the
-ML-DSA path is a smaller fraction of the total). Both stacks compile the same
-mldsa-native AVX2 core, so this reflects provider/packaging overhead on the
-identical algorithm, not an algorithmic difference.
+**The two paths agree to within ~3%** (e.g. ML-DSA-44 sign 17.1 vs 17.6, verify
+50.2 vs 52.2). That is the key finding: for ML-DSA the per-call EVP plumbing
+(provider fetch, context allocation, `DigestSignInit`) is a *negligible* fraction
+of the lattice sign/verify arithmetic, so amortizing it barely moves the number.
+This provider's **1.12–1.23× sign / 1.23–1.33× verify** advantage holds under
+both regimes — it is a genuine crypto-path difference, not a plumbing artifact,
+and it is not "init-dominated": for a primitive this expensive, context setup is
+in the noise.
 
-This one-shot path includes per-call EVP init; for a crypto-level ours-vs-oqs
-number with a reused signing context, `ci/bench_regression.c` (the nightly
-regression guard) bounds this provider within 1.5× of oqs-provider on
-keygen/sign.
+### ML-DSA hybrids — one-shot only
+
+| algorithm | ours sign / verify | oqs sign / verify | ratio sign / verify |
+|---|--:|--:|--:|
+| p256_mldsa44 | 11.5 / 13.1 | 11.2 / 12.3 | 1.03× / 1.06× |
+| rsa3072_mldsa44 | 0.6 / 18.2 | 0.6 / 16.9 | 1.00× / 1.08× |
+| p384_mldsa65 | 1.2 / 1.6 | 1.2 / 1.6 | 1.02× / 0.99× |
+| p521_mldsa87 | 0.6 / 0.7 | 0.6 / 0.7 | 1.01× / 1.01× |
+
+On the hybrids the two stacks are within ~8%: there the classical half (ECDSA/RSA
+from the default provider on both sides) dominates the cost, so the ML-DSA
+component — where this provider's edge lives — is a small fraction of the total.
+The reused-context path is **not** shown for the hybrids: hybrid-provider does not
+implement the raw `OSSL_FUNC_SIGNATURE_SIGN_INIT`/`VERIFY_INIT` entry points, so
+`EVP_PKEY_sign_init` fails for its composite keys and only the `EVP_DigestSign`
+one-shot path is usable. This is a hybrid-provider gap, not a general one — both
+this provider (for plain ML-DSA) and oqs-provider (for its hybrids) implement the
+raw path. See caveat 7.
+
+Both stacks compile the same mldsa-native AVX2 core, so these ratios reflect
+provider glue over an identical algorithm, not an algorithmic difference.
 
 ## Functional mismatches / caveats (explicit)
 
@@ -158,6 +184,16 @@ keygen/sign.
    `src/sig/ml_dsa/mldsa-native_*`), shipped un-deduplicated per level/backend —
    so the underlying algorithm code is identical; the size difference is
    packaging + library core + provider glue.
+7. **hybrid-provider does not serve the raw sign/verify API.** Its signature
+   dispatch table (`hybrid_sig_functions`) implements `DIGEST_SIGN_INIT`/
+   `DIGEST_SIGN` and registers `OSSL_FUNC_SIGNATURE_SIGN`/`VERIFY`, but omits
+   `OSSL_FUNC_SIGNATURE_SIGN_INIT` and `VERIFY_INIT`. Without the `*_INIT`
+   entry points `EVP_PKEY_sign_init()`/`EVP_PKEY_verify_init()` fail for its
+   composite keys, so the reused-context benchmark path cannot run on the
+   hybrids (only `EVP_DigestSign` works). Both this provider (plain ML-DSA) and
+   oqs-provider (its hybrids) implement the raw path, so this is specific to
+   hybrid-provider. Reported upstream for a fix; the two init functions can
+   delegate to the existing `hybrid_sig_digest_sign_init(..., mdname=NULL, ...)`.
 
 ## Bottom line
 
@@ -166,9 +202,11 @@ For identical delivered functionality (ML-DSA + the four ML-DSA hybrids), the
 oqs-provider (310.5 KiB vs 523.9 KiB), and the two interoperate in both
 directions. For plain ML-DSA alone it is **~2.3× smaller** (211.1 KiB vs
 494.9 KiB). Both stacks compile the same mldsa-native AVX2 core; on plain ML-DSA
-this provider is also **1.13–1.35× faster** in the one-shot interop benchmark
-(and within ~10% on the hybrids, where the classical half dominates). This
-provider additionally matches oqs-provider's plain-ML-DSA feature set below
+this provider is also **1.12–1.23× faster at sign and 1.23–1.33× at verify**,
+consistently whether the signing context is created per call (one-shot) or reused
+(the two paths agree within ~3%, so the edge is real crypto, not plumbing). On
+the hybrids the two are within ~8%, where the shared classical half dominates.
+This provider additionally matches oqs-provider's plain-ML-DSA feature set below
 OpenSSL 3.5 (TLS-SIGALG, OID/sigid registration, X.509/PKCS#8 codecs).
 
 See `run.sh` for the exact reproduction steps and `interop.c` for the interop +

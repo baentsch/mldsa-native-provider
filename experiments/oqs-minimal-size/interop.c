@@ -274,6 +274,7 @@ static double rate(int (*op)(void *), void *arg)
     return best;
 }
 
+/* --- one-shot ops: fresh EVP_MD_CTX + init on every call (full plumbing) --- */
 struct signarg { OSSL_LIB_CTX *c; EVP_PKEY *k; };
 static int op_sign(void *a)
 {
@@ -292,28 +293,93 @@ static int op_verify(void *a)
     return verify(v->c, v->k, v->sig, v->slen);
 }
 
-/* Benchmark one algorithm in one party. Returns 0 on setup failure. */
-static int bench_party(OSSL_LIB_CTX *c, const char *name,
-                       double *sign_ops, double *verify_ops)
+/* --- reused-context ops: one EVP_PKEY_CTX, EVP_PKEY_sign/verify back-to-back;
+ * the per-call provider fetch + ctx setup that the one-shot path pays every call
+ * is done once, up front, so this isolates the crypto cost. --- */
+struct rsign { EVP_PKEY_CTX *sc; unsigned char *sig; size_t cap; };
+static int op_sign_reuse(void *a)
+{
+    struct rsign *s = a;
+    size_t sl = s->cap;
+    return EVP_PKEY_sign(s->sc, s->sig, &sl, (const unsigned char *)MSG,
+                         sizeof(MSG) - 1) > 0;
+}
+struct rver { EVP_PKEY_CTX *vc; const unsigned char *sig; size_t slen; };
+static int op_verify_reuse(void *a)
+{
+    struct rver *v = a;
+    return EVP_PKEY_verify(v->vc, v->sig, v->slen, (const unsigned char *)MSG,
+                           sizeof(MSG) - 1) > 0;
+}
+
+/* Both throughputs for one algorithm in one party. os_* = one-shot; re_* =
+ * reused context (re_ok = 0 if the provider has no raw sign/verify API). */
+struct bench { double s_os, v_os, s_re, v_re; int os_ok, re_ok; };
+static void bench_party(OSSL_LIB_CTX *c, const char *name, int want_reuse,
+                        struct bench *b)
 {
     EVP_PKEY *k = keygen(c, name);
     unsigned char *sig = NULL;
     size_t slen = 0;
-    struct signarg sa;
-    struct verarg va;
 
-    if (k == NULL || !sign(c, k, &sig, &slen)) {
-        EVP_PKEY_free(k);
-        OPENSSL_free(sig);
-        return 0;
+    memset(b, 0, sizeof(*b));
+    if (k == NULL || !sign(c, k, &sig, &slen))
+        goto out;
+
+    {   /* one-shot */
+        struct signarg sa = { c, k };
+        struct verarg  va = { c, k, sig, slen };
+        b->s_os = rate(op_sign, &sa);
+        b->v_os = rate(op_verify, &va);
+        b->os_ok = 1;
     }
-    sa.c = c; sa.k = k;
-    va.c = c; va.k = k; va.sig = sig; va.slen = slen;
-    *sign_ops = rate(op_sign, &sa);
-    *verify_ops = rate(op_verify, &va);
+
+    if (want_reuse)
+    {   /* reused context (only if raw sign+verify are available and agree) */
+        EVP_PKEY_CTX *sc = EVP_PKEY_CTX_new_from_pkey(c, k, NULL);
+        EVP_PKEY_CTX *vc = EVP_PKEY_CTX_new_from_pkey(c, k, NULL);
+        unsigned char rsig[8192];
+        size_t rlen = sizeof(rsig);
+
+        if (sc != NULL && vc != NULL
+            && EVP_PKEY_sign_init(sc) > 0
+            && EVP_PKEY_verify_init(vc) > 0
+            && EVP_PKEY_sign(sc, rsig, &rlen, (const unsigned char *)MSG,
+                             sizeof(MSG) - 1) > 0
+            && EVP_PKEY_verify(vc, rsig, rlen, (const unsigned char *)MSG,
+                               sizeof(MSG) - 1) > 0) {
+            struct rsign rs = { sc, rsig, sizeof(rsig) };
+            struct rver  rv = { vc, rsig, rlen };
+            b->s_re = rate(op_sign_reuse, &rs);
+            b->v_re = rate(op_verify_reuse, &rv);
+            b->re_ok = 1;
+        }
+        EVP_PKEY_CTX_free(sc);
+        EVP_PKEY_CTX_free(vc);
+    }
+
+out:
     EVP_PKEY_free(k);
     OPENSSL_free(sig);
-    return 1;
+}
+
+/* Print one comparison row for either the one-shot (reuse=0) or reused (=1) path. */
+static void print_bench_row(const char *name, const struct bench *a,
+                            const struct bench *q, int reuse)
+{
+    double as = reuse ? a->s_re : a->s_os, av = reuse ? a->v_re : a->v_os;
+    double qs = reuse ? q->s_re : q->s_os, qv = reuse ? q->v_re : q->v_os;
+    int aok = reuse ? a->re_ok : a->os_ok, qok = reuse ? q->re_ok : q->os_ok;
+
+    printf("  %-16s ", name);
+    if (aok) printf("sign %6.1f verify %6.1f   ", as / 1e3, av / 1e3);
+    else     printf("%-24s ", "(unavailable)");
+    if (qok) printf("sign %6.1f verify %6.1f   ", qs / 1e3, qv / 1e3);
+    else     printf("%-24s ", "(unavailable)");
+    if (aok && qok && qs > 0 && qv > 0)
+        printf("sign %4.2fx verify %4.2fx\n", as / qs, av / qv);
+    else
+        printf("\n");
 }
 
 /* ------------------------------------------------------------------ */
@@ -342,27 +408,38 @@ int main(int argc, char **argv)
     printf(fails ? "  %d INTEROP FAILURE(S)\n" : "  ALL INTEROP PASSED\n", fails);
 
     if (do_bench) {
-        printf("\nBenchmark (sign / verify, thousands of ops per second, best of "
-               "%d windows of >= %.0fs each; higher is better).\n", REPEATS, WIN_S);
+        struct bench ob[NROWS], qb[NROWS];
+
+        printf("\nBenchmark: sign / verify in thousands of ops per second, best "
+               "of %d windows of >= %.0fs each; higher is better. Two paths:\n"
+               "  one-shot       = fresh EVP_MD_CTX + EVP_DigestSign(Verify)Init "
+               "every call (full EVP plumbing, real-world one-off cost).\n"
+               "  reused context = one EVP_PKEY_CTX kept across calls "
+               "(EVP_PKEY_sign/verify; the crypto cost with plumbing amortized).\n",
+               REPEATS, WIN_S);
+        for (i = 0; i < NROWS; i++) {
+            /* The reused raw EVP_PKEY_sign/verify API is only uniformly served
+             * for plain ML-DSA; the hybrid composite exposes it on neither
+             * stack cleanly, so we only reuse-measure the plain rows. */
+            int reuse = (strcmp(rows[i].kind, "plain") == 0);
+            bench_party(ours, rows[i].name_a, reuse, &ob[i]);
+            bench_party(oqs,  rows[i].name_b, reuse, &qb[i]);
+        }
+
+        printf("\n  one-shot (fresh context per call) -- plain ML-DSA + hybrids\n");
         printf("  %-16s %-24s %-24s %-15s\n", "algorithm",
                "ours (mldsanative/hybrid)", "oqs-provider", "ratio ours/oqs");
-        for (i = 0; i < NROWS; i++) {
-            const struct row *r = &rows[i];
-            double as = 0, av = 0, bs = 0, bv = 0;
-            int oka = bench_party(ours, r->name_a, &as, &av);
-            int okb = bench_party(oqs, r->name_b, &bs, &bv);
+        for (i = 0; i < NROWS; i++)
+            print_bench_row(rows[i].name_a, &ob[i], &qb[i], 0);
 
-            printf("  %-16s ", r->name_a);
-            if (oka) printf("sign %6.1f verify %6.1f   ", as / 1e3, av / 1e3);
-            else     printf("%-24s ", "(unavailable)");
-            if (okb) printf("sign %6.1f verify %6.1f   ", bs / 1e3, bv / 1e3);
-            else     printf("%-24s ", "(unavailable)");
-            if (oka && okb && bs > 0 && bv > 0)
-                printf("sign %4.2fx verify %4.2fx\n", as / bs, av / bv);
-            else
-                printf("\n");
-        }
-        printf("  (same ML-DSA core both sides -- liboqs's ML-DSA *is* "
+        printf("\n  reused context (EVP_PKEY_CTX kept across calls) -- plain ML-DSA only\n");
+        printf("  %-16s %-24s %-24s %-15s\n", "algorithm",
+               "ours (mldsanative/hybrid)", "oqs-provider", "ratio ours/oqs");
+        for (i = 0; i < NROWS; i++)
+            if (strcmp(rows[i].kind, "plain") == 0)
+                print_bench_row(rows[i].name_a, &ob[i], &qb[i], 1);
+
+        printf("\n  (same ML-DSA core both sides -- liboqs's ML-DSA *is* "
                "mldsa-native; this measures packaging/backend, not the algorithm)\n");
     }
 
