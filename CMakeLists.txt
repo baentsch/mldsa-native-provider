@@ -67,13 +67,38 @@ if(_mld_asm)
         MLD_CONFIG_USE_NATIVE_BACKEND_ARITH
         MLD_CONFIG_USE_NATIVE_BACKEND_FIPS202)
 endif()
-# Compile the amalgamation without our stricter provider warnings.
+
+# Architecture flags the native backend needs to ACTUALLY emit its optimized
+# code. On x86_64 both the AVX2 assembly bodies and the C dispatch that calls
+# them are gated on __AVX2__ (Keccak/arith) and use BMI2; without -mavx2 -mbmi2
+# on *both* the amalgamation and the assembly, mldsa-native silently falls back
+# to portable C -- roughly 4x slower -- while still advertising "native asm".
+# These flags are scoped to the mldsa-native sources; the provider's own C stays
+# architecture-neutral.
+#
+# Consequence: a native x86_64 build requires an AVX2-capable CPU at run time.
+# Use MLDSA_NATIVE_BACKEND=PORTABLE for a universal binary. On AArch64 the NEON
+# backend needs no extra flags (NEON is ARMv8-A baseline, __ARM_NEON predefined).
+set(_mld_native_flags "")
+if(_mld_asm AND _mld_arch MATCHES "x86_64|amd64")
+    set(_mld_native_flags -mavx2 -mbmi2)
+endif()
+
+# Compile the amalgamation without our stricter provider warnings, plus any
+# native flags. (list(APPEND ...) with empty flags is a no-op, so PORTABLE and
+# AArch64 builds get a clean "-w" with no stray empty compiler argument.)
+set(_mld_amalg_opts -w)
+list(APPEND _mld_amalg_opts ${_mld_native_flags})
 set_source_files_properties(${MLDSA_NATIVE_SRC} PROPERTIES
-    COMPILE_OPTIONS "-w"
+    COMPILE_OPTIONS "${_mld_amalg_opts}"
     COMPILE_DEFINITIONS "${_mld_native_defs}")
 if(_mld_asm)
     set_source_files_properties(${_mld_asm} PROPERTIES
         COMPILE_DEFINITIONS "${_mld_native_defs};MLD_CONFIG_MULTILEVEL_WITH_SHARED")
+    if(_mld_native_flags)
+        set_source_files_properties(${_mld_asm} PROPERTIES
+            COMPILE_OPTIONS "${_mld_native_flags}")
+    endif()
 endif()
 
 set(PROVIDER_SOURCES
