@@ -315,8 +315,7 @@ static int op_verify_reuse(void *a)
 /* Both throughputs for one algorithm in one party. os_* = one-shot; re_* =
  * reused context (re_ok = 0 if the provider has no raw sign/verify API). */
 struct bench { double s_os, v_os, s_re, v_re; int os_ok, re_ok; };
-static void bench_party(OSSL_LIB_CTX *c, const char *name, int want_reuse,
-                        struct bench *b)
+static void bench_party(OSSL_LIB_CTX *c, const char *name, struct bench *b)
 {
     EVP_PKEY *k = keygen(c, name);
     unsigned char *sig = NULL;
@@ -334,22 +333,25 @@ static void bench_party(OSSL_LIB_CTX *c, const char *name, int want_reuse,
         b->os_ok = 1;
     }
 
-    if (want_reuse)
     {   /* reused context (only if raw sign+verify are available and agree) */
         EVP_PKEY_CTX *sc = EVP_PKEY_CTX_new_from_pkey(c, k, NULL);
         EVP_PKEY_CTX *vc = EVP_PKEY_CTX_new_from_pkey(c, k, NULL);
-        unsigned char rsig[8192];
-        size_t rlen = sizeof(rsig);
+        /* Separate buffers: the sign-timing loop re-signs into ssig every call,
+         * so verify must read an untouched reference. ECDSA-hybrid signatures are
+         * DER, whose length varies by ~1 byte per signature, so a shared buffer
+         * would leave the verify loop checking fresh bytes against a stale length. */
+        unsigned char vsig[8192], ssig[8192];
+        size_t vlen = sizeof(vsig);
 
         if (sc != NULL && vc != NULL
             && EVP_PKEY_sign_init(sc) > 0
             && EVP_PKEY_verify_init(vc) > 0
-            && EVP_PKEY_sign(sc, rsig, &rlen, (const unsigned char *)MSG,
+            && EVP_PKEY_sign(sc, vsig, &vlen, (const unsigned char *)MSG,
                              sizeof(MSG) - 1) > 0
-            && EVP_PKEY_verify(vc, rsig, rlen, (const unsigned char *)MSG,
+            && EVP_PKEY_verify(vc, vsig, vlen, (const unsigned char *)MSG,
                                sizeof(MSG) - 1) > 0) {
-            struct rsign rs = { sc, rsig, sizeof(rsig) };
-            struct rver  rv = { vc, rsig, rlen };
+            struct rsign rs = { sc, ssig, sizeof(ssig) };
+            struct rver  rv = { vc, vsig, vlen };
             b->s_re = rate(op_sign_reuse, &rs);
             b->v_re = rate(op_verify_reuse, &rv);
             b->re_ok = 1;
@@ -418,12 +420,11 @@ int main(int argc, char **argv)
                "(EVP_PKEY_sign/verify; the crypto cost with plumbing amortized).\n",
                REPEATS, WIN_S);
         for (i = 0; i < NROWS; i++) {
-            /* The reused raw EVP_PKEY_sign/verify API is only uniformly served
-             * for plain ML-DSA; the hybrids expose it on neither stack
-             * cleanly, so we only reuse-measure the plain rows. */
-            int reuse = (strcmp(rows[i].kind, "plain") == 0);
-            bench_party(ours, rows[i].name_a, reuse, &ob[i]);
-            bench_party(oqs,  rows[i].name_b, reuse, &qb[i]);
+            /* Measure both paths for every row (plain ML-DSA and the hybrids);
+             * bench_party's re_ok guard falls back gracefully if a provider does
+             * not serve the raw sign/verify path. */
+            bench_party(ours, rows[i].name_a, &ob[i]);
+            bench_party(oqs,  rows[i].name_b, &qb[i]);
         }
 
         printf("\n  one-shot (fresh context per call) -- plain ML-DSA + hybrids\n");
@@ -432,12 +433,11 @@ int main(int argc, char **argv)
         for (i = 0; i < NROWS; i++)
             print_bench_row(rows[i].name_a, &ob[i], &qb[i], 0);
 
-        printf("\n  reused context (EVP_PKEY_CTX kept across calls) -- plain ML-DSA only\n");
+        printf("\n  reused context (EVP_PKEY_CTX kept across calls) -- plain ML-DSA + hybrids\n");
         printf("  %-16s %-24s %-24s %-15s\n", "algorithm",
                "ours (mldsanative/hybrid)", "oqs-provider", "ratio ours/oqs");
         for (i = 0; i < NROWS; i++)
-            if (strcmp(rows[i].kind, "plain") == 0)
-                print_bench_row(rows[i].name_a, &ob[i], &qb[i], 1);
+            print_bench_row(rows[i].name_a, &ob[i], &qb[i], 1);
 
         printf("\n  (same ML-DSA core both sides -- liboqs's ML-DSA *is* "
                "mldsa-native; this measures packaging/backend, not the algorithm)\n");

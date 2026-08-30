@@ -37,7 +37,7 @@ sign / verify. In every speed row the bigger number is on this provider's side.
 |---|--:|--:|:--|
 | total module size, stripped (↓ better) | **310.5 KiB** (211.1 + 99.3) | 523.9 KiB | **1.69× smaller** |
 | plain-ML-DSA speed | 1.12–1.34× faster | baseline | **faster** |
-| hybrid speed | ≈ parity (within ~8%) | baseline | ~equal |
+| hybrid speed | ≈ parity (within ~10%) | baseline | ~equal |
 
 (keygen ratios from `ci/bench_regression.c`; sign/verify from `interop.c`; both
 reused-context. Per-level detail and the one-shot-vs-reused breakdown follow.)
@@ -166,24 +166,29 @@ both regimes — it is a genuine crypto-path difference, not a plumbing artifact
 and it is not "init-dominated": for a primitive this expensive, context setup is
 in the noise.
 
-### ML-DSA hybrids — one-shot only
+### ML-DSA hybrids — one-shot (fresh context per call)
 
 | algorithm | ours sign / verify (k ops/s ↑) | oqs sign / verify (k ops/s ↑) | ratio sign / verify |
 |---|--:|--:|--:|
-| p256_mldsa44 | 11.5 / 13.1 | 11.2 / 12.3 | 1.03× / 1.06× |
-| rsa3072_mldsa44 | 0.6 / 18.2 | 0.6 / 16.9 | 1.00× / 1.08× |
-| p384_mldsa65 | 1.2 / 1.6 | 1.2 / 1.6 | 1.02× / 0.99× |
-| p521_mldsa87 | 0.6 / 0.7 | 0.6 / 0.7 | 1.01× / 1.01× |
+| p256_mldsa44 | 12.2 / 13.1 | 11.2 / 12.4 | 1.10× / 1.05× |
+| rsa3072_mldsa44 | 0.6 / 18.5 | 0.6 / 17.2 | 1.00× / 1.07× |
+| p384_mldsa65 | 1.3 / 1.7 | 1.3 / 1.6 | 1.01× / 1.00× |
+| p521_mldsa87 | 0.6 / 0.7 | 0.6 / 0.7 | 1.02× / 1.01× |
 
-On the hybrids the two stacks are within ~8%: there the classical half (ECDSA/RSA
-from the default provider on both sides) dominates the cost, so the ML-DSA
-component — where this provider's edge lives — is a small fraction of the total.
-The reused-context path is **not** shown for the hybrids: hybrid-provider does not
-implement the raw `OSSL_FUNC_SIGNATURE_SIGN_INIT`/`VERIFY_INIT` entry points, so
-`EVP_PKEY_sign_init` fails for its hybrid keys and only the `EVP_DigestSign`
-one-shot path is usable. This is a hybrid-provider gap, not a general one — both
-this provider (for plain ML-DSA) and oqs-provider (for its hybrids) implement the
-raw path. See caveat 7.
+### ML-DSA hybrids — reused context (`EVP_PKEY_CTX` kept across calls)
+
+| algorithm | ours sign / verify (k ops/s ↑) | oqs sign / verify (k ops/s ↑) | ratio sign / verify |
+|---|--:|--:|--:|
+| p256_mldsa44 | 12.6 / 13.2 | 11.7 / 12.9 | 1.08× / 1.03× |
+| rsa3072_mldsa44 | 0.6 / 19.0 | 0.6 / 18.2 | 1.00× / 1.05× |
+| p384_mldsa65 | 1.3 / 1.7 | 1.3 / 1.6 | 1.02× / 1.01× |
+| p521_mldsa87 | 0.6 / 0.8 | 0.6 / 0.7 | 1.02× / 1.02× |
+
+On the hybrids the two stacks are within ~10% on **both** paths: the classical half
+(ECDSA/RSA from the default provider on both sides) dominates the cost, so the
+ML-DSA component — where this provider's edge lives — is a small fraction of the
+total. As with plain ML-DSA, the one-shot and reused numbers agree to within a few
+percent — for a signature this expensive the per-call EVP plumbing is in the noise.
 
 Both stacks compile the same mldsa-native AVX2 core, so these ratios reflect
 provider glue over an identical algorithm, not an algorithmic difference.
@@ -222,17 +227,6 @@ provider glue over an identical algorithm, not an algorithmic difference.
    `src/sig/ml_dsa/mldsa-native_*`), shipped un-deduplicated per level/backend —
    so the underlying algorithm code is identical; the size difference is
    packaging + library core + provider glue.
-7. **hybrid-provider does not serve the raw sign/verify API.** Its signature
-   dispatch table (`hybrid_sig_functions`) implements `DIGEST_SIGN_INIT`/
-   `DIGEST_SIGN` and registers `OSSL_FUNC_SIGNATURE_SIGN`/`VERIFY`, but omits
-   `OSSL_FUNC_SIGNATURE_SIGN_INIT` and `VERIFY_INIT`. Without the `*_INIT`
-   entry points `EVP_PKEY_sign_init()`/`EVP_PKEY_verify_init()` fail for its
-   hybrid keys, so the reused-context benchmark path cannot run on the
-   hybrids (only `EVP_DigestSign` works). Both this provider (plain ML-DSA) and
-   oqs-provider (its hybrids) implement the raw path, so this is specific to
-   hybrid-provider. Reported upstream (hybrid-provider#79); the two init
-   functions can delegate to the existing
-   `hybrid_sig_digest_sign_init(..., mdname=NULL, ...)`.
 
 ## Bottom line
 
@@ -244,7 +238,8 @@ directions. For plain ML-DSA alone it is **~2.3× smaller** (211.1 KiB vs
 this provider is also **1.12–1.23× faster at sign and 1.23–1.33× at verify**,
 consistently whether the signing context is created per call (one-shot) or reused
 (the two paths agree within ~3%, so the edge is real crypto, not plumbing). On
-the hybrids the two are within ~8%, where the shared classical half dominates.
+the hybrids the two are within ~10% — on both the one-shot and reused-context
+paths — where the shared classical half dominates.
 This provider additionally matches oqs-provider's plain-ML-DSA feature set below
 OpenSSL 3.5 (TLS-SIGALG, OID/sigid registration, X.509/PKCS#8 codecs).
 
