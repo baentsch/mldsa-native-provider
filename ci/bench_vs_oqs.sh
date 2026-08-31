@@ -19,7 +19,8 @@
 #   OURS_SO          path to this provider's built mldsanative.so (native backend)
 # Optional env:
 #   LIBOQS_REF       liboqs git ref to pin       (default: 0.15.0)
-#   OQSPROV_REF      oqs-provider git ref to pin  (default: 0.11.0)
+#   OQSPROV_REF      oqs-provider git ref to pin  (default: 573fb25, the post-
+#                    0.11.0 fix that serves ML-DSA on OpenSSL < 3.5; see below)
 #   LIBOQS_SRC       use an existing liboqs checkout instead of cloning
 #   OQSPROV_SRC      use an existing oqs-provider checkout instead of cloning
 #   WORK             scratch dir (default: mktemp)
@@ -29,12 +30,16 @@ set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
 : "${OPENSSL_PREFIX:?set OPENSSL_PREFIX to an OpenSSL <3.5 install}"
 : "${OURS_SO:?set OURS_SO to the built mldsanative.so}"
-# oqs-provider 0.11.0 pairs with liboqs 0.15.0 (its tested combination) and
-# registers ML-DSA as mldsa44/65/87 on OpenSSL < 3.5. Older pins (0.8.0/0.12.0)
-# failed to register mldsa44 against current openssl-3.2 branch tips, which the
-# guard misread as a perf regression.
+# Pin to a post-0.11.0 oqs-provider commit paired with liboqs 0.15.0. The 0.11.0
+# *release* is unusable here: it enables its algorithm-fetch cache on every
+# OpenSSL, which stops it serving ML-DSA on OpenSSL < 3.5 -- the provider loads
+# but mldsa44/65/87 are unavailable, so the guard measured nothing and misread it
+# as a perf regression. Commit 573fb25 (PR #735, "Enable Algo Fetch Cache
+# mechanism only for OpenSSL v3.5.0 or newer") fixes exactly that; it is the
+# first commit after 0.11.0 that serves ML-DSA on the <3.5 line again. Bump this
+# to the next oqs-provider release once one ships with #735.
 LIBOQS_REF="${LIBOQS_REF:-0.15.0}"
-OQSPROV_REF="${OQSPROV_REF:-0.11.0}"
+OQSPROV_REF="${OQSPROV_REF:-573fb25ed56aa83148c605125bc73379f439648b}"
 WORK="${WORK:-$(mktemp -d)}"
 mkdir -p "$WORK"
 
