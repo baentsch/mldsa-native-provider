@@ -48,12 +48,12 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ github.workspace }}/ossl
-          key: ossl-${{ matrix.arch }}-openssl-3.2-v1
+          key: ossl-${{ matrix.arch }}-openssl-3.4-v1
 
-      - name: Build OpenSSL (openssl-3.2)
+      - name: Build OpenSSL (openssl-3.4)
         if: steps.cache-ossl.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 -b openssl-3.2 https://github.com/openssl/openssl.git ossl-src
+          git clone --depth 1 -b openssl-3.4 https://github.com/openssl/openssl.git ossl-src
           cd ossl-src
           ./Configure --prefix="${{ github.workspace }}/ossl" --libdir=lib no-docs
           make -j"$(nproc)"

@@ -131,12 +131,23 @@ int main(void)
     };
     const char *e;
     double max_slowdown = (e = getenv("MLDSA_BENCH_MAX_SLOWDOWN")) ? atof(e) : 1.5;
-    int i, failed = 0, measured = 0;
+    int i, failed = 0, measured = 0, ours_ok = 0, oqs_ok = 0;
 
     if ((e = getenv("MLDSA_BENCH_SECONDS")) != NULL && atof(e) > 0)
         g_seconds = atof(e);
-    if (ours == NULL || oqs == NULL)
+    /* Distinguish a broken *baseline* from a broken *us*: if our own provider
+     * fails to load that is a genuine failure (exit 2), but if only the
+     * oqs-provider baseline is unavailable there is nothing to compare against,
+     * so skip (exit 77) rather than masquerade as a perf regression. */
+    if (ours == NULL) {
+        fprintf(stderr, "our provider (mldsanative) failed to load\n");
         return 2;
+    }
+    if (oqs == NULL) {
+        fprintf(stderr, "oqs-provider baseline failed to load -- "
+                        "cannot compare; skipping\n");
+        return 77;
+    }
     if (max_slowdown < 1.0)
         max_slowdown = 1.5;
 
@@ -155,6 +166,8 @@ int main(void)
             double b = ops[j].fn(oqs, lv[i].oqs);
             const char *verdict;
 
+            if (a > 0.0) ours_ok++;
+            if (b > 0.0) oqs_ok++;
             if (a <= 0.0 || b <= 0.0) {
                 /* Can't measure this op on one side (e.g. no one-shot sign):
                  * skip rather than fail spuriously. */
@@ -174,6 +187,15 @@ int main(void)
     OSSL_LIB_CTX_free(oqs);
 
     if (measured == 0) {
+        /* Our side ran but the baseline served nothing (e.g. this oqs-provider
+         * build disabled mldsa44/65/87 on this OpenSSL): a baseline problem, not
+         * a regression -- skip rather than file a false alarm. */
+        if (ours_ok > 0 && oqs_ok == 0) {
+            fprintf(stderr, "oqs-provider baseline served no ML-DSA operations "
+                            "(mldsa44/65/87 unavailable) -- cannot compare; "
+                            "skipping\n");
+            return 77;
+        }
         fprintf(stderr, "no operations could be measured\n");
         return 2;
     }
