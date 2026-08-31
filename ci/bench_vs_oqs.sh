@@ -18,8 +18,8 @@
 #   OPENSSL_PREFIX   OpenSSL (< 3.5) install prefix (has bin/ lib{,64}/ include/)
 #   OURS_SO          path to this provider's built mldsanative.so (native backend)
 # Optional env:
-#   LIBOQS_REF       liboqs git ref to pin       (default: 0.12.0)
-#   OQSPROV_REF      oqs-provider git ref to pin  (default: 0.8.0)
+#   LIBOQS_REF       liboqs git ref to pin       (default: 0.15.0)
+#   OQSPROV_REF      oqs-provider git ref to pin  (default: 0.11.0)
 #   LIBOQS_SRC       use an existing liboqs checkout instead of cloning
 #   OQSPROV_SRC      use an existing oqs-provider checkout instead of cloning
 #   WORK             scratch dir (default: mktemp)
@@ -29,8 +29,12 @@ set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
 : "${OPENSSL_PREFIX:?set OPENSSL_PREFIX to an OpenSSL <3.5 install}"
 : "${OURS_SO:?set OURS_SO to the built mldsanative.so}"
-LIBOQS_REF="${LIBOQS_REF:-0.12.0}"
-OQSPROV_REF="${OQSPROV_REF:-0.8.0}"
+# oqs-provider 0.11.0 pairs with liboqs 0.15.0 (its tested combination) and
+# registers ML-DSA as mldsa44/65/87 on OpenSSL < 3.5. Older pins (0.8.0/0.12.0)
+# failed to register mldsa44 against current openssl-3.2 branch tips, which the
+# guard misread as a perf regression.
+LIBOQS_REF="${LIBOQS_REF:-0.15.0}"
+OQSPROV_REF="${OQSPROV_REF:-0.11.0}"
 WORK="${WORK:-$(mktemp -d)}"
 mkdir -p "$WORK"
 
