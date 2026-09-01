@@ -1,9 +1,18 @@
 name: CI
 
 on:
+  # Only push events on main; branch commits are covered by pull_request, so a
+  # branch with an open PR is not built twice (once for push, once for the PR).
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
+
+# Cancel superseded runs for the same ref (e.g. rapid pushes to a PR); the newest
+# commit is the only one worth building.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 # Demonstrate the version story AND the platform story:
 #   * openssl-3.2 : the provider builds and its FIPS-204 KAT passes; the
