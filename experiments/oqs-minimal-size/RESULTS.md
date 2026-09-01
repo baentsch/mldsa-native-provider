@@ -1,10 +1,12 @@
 # Experiment: minimal oqs-provider vs mldsa-native-provider (binary size + interop)
 
-**Status:** local experiment (feature branch `experiment/oqs-minimal-size`), not
-part of the shipped provider. All numbers are x86_64, `strip -s`, self-contained
-modules (crypto statically linked), gcc `-O3`/Release. `mldsanative.so` is built
-with its native backend (x86_64 AVX2 asm), matching the mldsa-native core that
-liboqs — and therefore oqs-provider — also compiles. Reproduce with `run.sh`.
+**Status:** a size/speed/interop study, merged to `main` under
+`experiments/oqs-minimal-size/`. It is a standalone comparison, **not** part of
+the shipped provider runtime or build. All numbers are x86_64, `strip -s`,
+self-contained modules (crypto statically linked), gcc `-O3`/Release.
+`mldsanative.so` is built with its native backend (x86_64 AVX2 asm), matching the
+mldsa-native core that liboqs — and therefore oqs-provider — also compiles.
+Reproduce with `run.sh` (see the bottom of this file).
 
 ## Head-to-head summary (TL;DR)
 
