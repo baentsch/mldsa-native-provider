@@ -52,113 +52,39 @@ runtime registration it does is conditional: on OpenSSL < 3.5 (which lacks nativ
 ML-DSA) it registers the standard ML-DSA OIDs/sigids and a TLS-SIGALG capability
 so certificates and TLS work; on 3.5+ it adds nothing, deferring to the core.
 
-### Code size
+### Code size and audit surface
 
-Provider logic and tests are directly comparable across all three (measured with
-`wc -l` over C/H sources; `hybrid-provider` also has shell harnesses):
+Counting **everything needed to run ML-DSA**, this provider is **~21k lines**
+(~2.0k provider logic + ~19k mldsa-native) versus **~163k** for oqs-provider
+(~13.4k provider logic + ~20.6k liboqs core/API + ~129.5k ML-DSA — the *same*
+mldsa-native code, but shipped as a separate copy per level × per backend). The
+primitive's own risk is identical (both wrap mldsa-native); the honest
+differentiator is the surrounding surface — a direct call here vs. liboqs's API
+plus oqs-provider glue, and no EVP-composition or OID-patching machinery. Line
+count alone is a weak proxy, but no intermediate layers and no extra runtime
+dependencies genuinely lower audit and attack surface.
 
-| Component | mldsa-native-provider | [oqs-provider](https://github.com/open-quantum-safe/oqs-provider) | [hybrid-provider](https://github.com/baentsch/hybrid-provider) |
-|---|--:|--:|--:|
-| Provider logic (the code you audit) | **~2.0k** | ~13.4k | ~9.5k |
-| Tests (excl. embedded KAT vectors) | ~0.5k C + 0.3k shell | ~3.3k C | ~12.3k C + 1.4k shell |
+Full per-layer tables and an honest treatment of the "less code = less
+vulnerability?" question: **[docs/COMPARISON.md](docs/COMPARISON.md)**. The
+numbers are backed by a reproducible size/speed/interop experiment vs a minimal
+oqs-provider (plain ML-DSA: **~2.3× smaller, 1.12–1.34× faster**, interop both
+ways) — **[experiments/oqs-minimal-size/RESULTS.md](experiments/oqs-minimal-size/RESULTS.md)**.
 
-For the *crypto*, an apples-to-apples comparison counts **everything needed to
-run ML-DSA** — i.e. what this provider embeds (mldsa-native) versus the
-equivalent slice of liboqs (its common library core + its ML-DSA implementation,
-which is itself mldsa-native¹). `hybrid-provider` is omitted here because it
-embeds no crypto — it delegates ML-DSA to whichever provider serves it:
+## Interoperability
 
-| Layer needed to run ML-DSA | mldsa-native-provider | [oqs-provider](https://github.com/open-quantum-safe/oqs-provider) |
-|---|--:|--:|
-| Provider logic | ~2.0k | ~13.4k |
-| Library core (common + SIG API) | none | ~20.6k (liboqs `common` ~16.7k + `sig` API ~3.9k) |
-| ML-DSA implementation (mldsa-native) | ~19k¹ | ~129.5k² |
-| **Total to run ML-DSA** | **~21k** | **~163k** |
+- **With the OpenSSL default provider (byte-for-byte).** Same 32-byte seed →
+  identical public key; a signature from one provider verifies with the other in
+  both directions; and `SubjectPublicKeyInfo` / `seed-priv` PKCS#8 written by one
+  side is read by the other, with DER byte-identical in shape to the default
+  provider's. Deterministic keygen/signing also reproduce the FIPS 204 KATs.
+- **With the wider ecosystem.** Using **only this provider** for the ML-DSA
+  operations, the `ietf_interop` test verifies the certificates and every
+  private-key form published by **7 independent implementations** at
+  [IETF-Hackathon/pqc-certificates](https://github.com/IETF-Hackathon/pqc-certificates)
+  — **117 checks across all three levels, on both OpenSSL 3.4 and 3.5**.
 
-¹ [mldsa-native](https://github.com/pq-code-package/mldsa-native): ~18k C/H +
-0.8k asm covering **all three levels** with the portable-C core plus x86_64/AArch64
-backends, deduplicated across levels via one monolithic build.
-
-² liboqs's ML-DSA **is the same mldsa-native code**, vendored under
-`src/sig/ml_dsa/mldsa-native_ml-dsa-{44,65,87}_{ref,x86_64,aarch64}`. It ships a
-**separate copy per level × per backend** (each `_ref` copy alone is ~9.8k,
-replicated identically for 44/65/87) instead of one multi-level build — so for
-*identical functionality* its ML-DSA footprint is ~7× the ~19k here. The
-algorithm code is byte-for-byte the same upstream; the difference is packaging
-plus liboqs's library core and API layer.
-
-### Does less code mean less vulnerability potential?
-
-Partly, and it is a fair argument — with caveats worth stating honestly:
-
-- **Yes, in the ways that matter for attack/audit surface.** The provider logic
-  you must review is ~2k lines versus ~9–13k, there is **no dependency on a
-  large multi-algorithm library** (liboqs is ~343k lines of C/asm), and there is
-  **no EVP-composition or OID-patching machinery**. Removing intermediate
-  abstractions and dynamic dispatch eliminates whole classes of integration and
-  misconfiguration bugs. Fewer lines and fewer moving parts genuinely lower the
-  cost of a complete audit and the surface an attacker can reach.
-- **The ML-DSA crypto itself is the same in both.** oqs-provider's ML-DSA *is*
-  mldsa-native (vendored inside liboqs), so the primitive's own risk is identical
-  — the honest differentiator is the surrounding surface (a direct call here vs.
-  liboqs's API plus oqs-provider glue), not the algorithm implementation.
-- **Even like-for-like, the ML-DSA path is much smaller here.** Counting
-  everything needed to run ML-DSA (see the table above) it is ~21k vs ~163k — and
-  that comparison already isolates ML-DSA, so it is *not* just scope: the
-  difference is the absence of a library core/API layer and liboqs's per-level
-  duplication of the same code. Where scope *does* explain size is the
-  broader **provider-logic** count (oqs-provider and hybrid-provider carry more
-  because they serve many algorithms, hybrids and composites).
-- **The crypto still exists and still counts.** ~18k lines of mldsa-native are
-  pulled in (as a pinned submodule) — it is simply single-purpose. Whatever
-  assurance properties that
-  upstream code has are the upstream's; they are **not** claims about this
-  provider's overall code path. The provider's own glue (keymgmt, signature,
-  encoders/decoders, parameter handling) is ordinary C and carries no such
-  guarantees, so it must be judged on its own merits.
-- **Pinning shifts, not removes, responsibility.** Pinning mldsa-native as a
-  submodule means bumping it ourselves to pick up upstream fixes (a supply-chain
-  duty), whereas a shared `liboqs` is patched in one place — though the pin is at
-  least explicit and auditable in git.
-- **LOC is a weak proxy.** Complexity, memory safety, and test coverage predict
-  vulnerabilities far better than line count.
-
-Bottom line: the smaller, dependency-light, single-purpose design does reduce
-attack surface and audit burden — but the durable benefits come from **no
-intermediate layers, no extra runtime dependencies, and a small single-purpose
-surface**, more than from the line count itself.
-
-## Interoperability with the OpenSSL default provider
-
-Verified by the test suite and byte-for-byte against OpenSSL 3.5's default
-provider:
-
-- **Seed-expansion parity** — importing the same 32-byte seed into both
-  providers yields the identical public key.
-- **Cross sign/verify** — a signature produced by one provider verifies with
-  the other, in both directions (pure ML-DSA, empty context).
-- **Key-file formats** — public keys as `SubjectPublicKeyInfo` (raw key in the
-  BIT STRING) and private keys as PKCS#8 in the default provider's `seed-priv`
-  form: `privateKey OCTET STRING { SEQUENCE { OCTET STRING seed(32),
-  OCTET STRING expandedKey } }`. PEM/DER written by one side is read by the
-  other; the DER is byte-identical in shape to the default provider's.
-- **Known-answer tests** — deterministic keygen and signing reproduce the
-  FIPS 204 test vectors shipped with mldsa-native.
-
-## Cross-implementation interop (IETF pqc-certificates)
-
-The `ietf_interop` test consumes the ML-DSA artifacts published by many
-independent implementations at
-[IETF-Hackathon/pqc-certificates](https://github.com/IETF-Hackathon/pqc-certificates)
-and, using **only this provider** for the ML-DSA operations, checks that each
-implementation's self-signed trust-anchor certificate verifies and that every
-private-key form they ship (`seed` / `expandedKey` / `both`) loads and signs.
-It currently passes against **7 implementations** (bc, botan, carl-redhound,
-openjdk, ossl35, safelogic, sanctum-secops) across all three levels — **117
-checks, on both OpenSSL 3.4 and 3.5**. Because this provider now supplies the
-X.509 machinery for ML-DSA below 3.5 (OID/sigid registration + SPKI/PKCS#8
-codecs), the test no longer needs a 3.5 core; it self-skips only without network
-access or if the provider cannot be loaded.
+Wire-format specifics (the `seed-priv` ASN.1 layout), the full implementation
+list, and the < 3.5 X.509 caveats: **[docs/INTEROP.md](docs/INTEROP.md)**.
 
 ## OpenSSL version support
 
@@ -184,10 +110,12 @@ self-skips on 3.5+, where the capability is intentionally inactive (the default
 provider advertises the schemes) and the handshake runs via the default.
 
 CI (`.github/workflows/ci.yml`) builds against the `openssl-3.2` and
-`openssl-3.5` branches on both **x86_64** and **aarch64** GitHub runners, runs
-the full test suite on each, and (on 3.5) prints the benchmark so the
-CPU-optimized numbers for the AVX2 and AArch64 asm backends are visible per
-architecture.
+`openssl-3.5` branches on both **x86_64** and **aarch64** GitHub runners and runs
+the full test suite on each. Benchmarking is deliberately kept **off** this
+push/PR path; a nightly workflow (`.github/workflows/bench-regression.yml`)
+instead regenerates the performance numbers (OpenSSL 3.5 + 4.0, both arches) and
+guards against regressions vs both the default provider and oqs-provider — see
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md#how-ci-regenerates-and-guards-these-numbers).
 
 ## Build
 
@@ -240,32 +168,23 @@ the EVP API. **[USAGE.md](USAGE.md)** documents all three with worked examples.
 
 ## Performance
 
-`test/benchmark.sh` is a worked `openssl speed` example that runs each level
-under both providers (differing only in the property query) and prints a
-comparison plus the machine and active backend:
+On CPUs with an mldsa-native asm backend (x86_64 AVX2, AArch64 NEON) this
+provider is several times faster than the default provider's portable-C ML-DSA.
+The comparison only exists on **OpenSSL 3.5+** (before 3.5 the default has no
+ML-DSA); this provider's own throughput is independent of the libcrypto version.
+Speed-up vs the default provider, ML-DSA-65, `openssl speed` (**higher is
+faster**):
 
-```sh
-OPENSSL=/path/to/openssl OPENSSL_LIBPATH=/path/to/openssl/lib \
-MODULE_DIR=$PWD/build  test/benchmark.sh
-```
+| platform | keygen | sign | verify |
+|---|--:|--:|--:|
+| x86_64 — AMD Ryzen 7 5800U (AVX2) | 4.4× | 9.2× | 4.8× |
+| aarch64 — Neoverse-N2 (NEON) | 3.2× | 6.7× | 3.6× |
 
-Because mldsa-native is optimized for **specific CPUs** (x86_64 AVX2, AArch64)
-while the default provider's ML-DSA is **portable C everywhere**, the speed-up is
-platform-specific — measure on your target hardware. With the asm backend
-actually engaged, both architectures see a large win over the portable-C default
-(measured with `openssl speed` on OpenSSL 3.5, this provider vs the default):
-
-| operation | x86_64 (AVX2) | aarch64 (Neoverse-N2, NEON) |
-|---|--:|--:|
-| ML-DSA-65 keygen | ~4.3× | ~3.2× |
-| ML-DSA-65 sign   | ~9.0× | ~6.8× |
-| ML-DSA-65 verify | ~4.6× | ~3.6× |
-
-Signing gains the most (it is the most SHAKE/rejection-heavy), and the exact
-ratios are CPU-specific — CI prints the per-architecture numbers on every run;
-don't carry one machine's number to another. See the "Performance and platform
-targeting" section of [USAGE.md](USAGE.md) for details
-and caveats.
+Speed-up is **specific to the CPU and the build's backend** — measure on your own
+hardware with `test/benchmark.sh` (`FORMAT=md` for a paste-ready table); don't
+carry one machine's number to another. Full per-level and per-version tables,
+methodology, reproduction, and the nightly CI perf gates:
+**[docs/PERFORMANCE.md](docs/PERFORMANCE.md)**.
 
 ## Test
 
@@ -307,8 +226,13 @@ mldsa_native_compat.h       OSSL_PARAM name shims for OpenSSL 3.2-3.4 headers
 mldsa_glue/                 multi-level wrapper + our config (MLD_CONFIG_FILE)
 third_party/mldsa-native/   mldsa-native, pinned git submodule (the crypto)
 test/                       KAT + interop tests, IETF interop + benchmark scripts
-.github/workflows/ci.yml    CI: build + test against openssl-3.2 and openssl-3.5
-USAGE.md                    selecting default vs this provider; performance & platforms
+.github/workflows/            ci.yml: build + test (openssl-3.2/3.5, x86_64+aarch64)
+                              bench-regression.yml: nightly perf gates + numbers
+USAGE.md                    selecting default vs this provider (CLI / cnf / EVP)
+docs/COMPARISON.md          code-size & audit-surface detail vs oqs/hybrid-provider
+docs/INTEROP.md             default-provider parity + IETF cross-impl interop detail
+docs/PERFORMANCE.md         full perf tables, methodology, reproduction, CI gates
+experiments/oqs-minimal-size/  reproducible size/speed/interop study vs oqs-provider
 ```
 
 ## Dependencies & license

@@ -76,10 +76,7 @@ jobs:
           O="${{ github.workspace }}/ossl"
           LD_LIBRARY_PATH="$O/lib" ctest --test-dir build --output-on-failure --no-tests=error
 
-      - name: Benchmark vs default provider (informational)
-        if: matrix.ossl-branch == 'openssl-3.5'
-        continue-on-error: true
-        run: |
-          O="${{ github.workspace }}/ossl"
-          OPENSSL="$O/bin/openssl" OPENSSL_LIBPATH="$O/lib" \
-            MODULE_DIR="$PWD/build" SECONDS_PER=2 bash test/benchmark.sh
+      # The vs-default performance numbers are NOT collected here: benchmarking
+      # on every push/PR is wasteful and noisy on shared runners. They are
+      # gathered nightly instead -- see .github/workflows/bench-regression.yml
+      # (job "perf-numbers"), off the critical push/PR path.

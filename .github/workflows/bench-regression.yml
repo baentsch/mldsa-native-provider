@@ -1,14 +1,27 @@
-name: Nightly perf regression vs oqs-provider
+name: Nightly ML-DSA benchmarks
 
-# Guards against the native (asm) backend silently regressing to portable C.
-# Both this provider and oqs-provider wrap the SAME mldsa-native core, so on the
-# optimized platforms (x86_64 AVX2, AArch64 NEON) they should be within a small
-# factor. ci/bench_vs_oqs.sh builds a minimal, host-optimized oqs-provider and
-# runs ci/bench_regression.c, which fails if this provider is more than
-# MLDSA_MAX_SLOWDOWN times slower on keygen or sign at any level.
+# Two nightly benchmark jobs, both off the push/PR critical path:
 #
-# On failure the job goes red AND opens/updates a tracking issue (one per arch,
-# de-duplicated); on recovery it closes that issue.
+# 1. bench (regression gate) -- guards against the native (asm) backend silently
+#    regressing to portable C. Both this provider and oqs-provider wrap the SAME
+#    mldsa-native core, so on the optimized platforms (x86_64 AVX2, AArch64 NEON)
+#    they should be within a small factor. ci/bench_vs_oqs.sh builds a minimal,
+#    host-optimized oqs-provider and runs ci/bench_regression.c, which fails if
+#    this provider is more than MLDSA_MAX_SLOWDOWN times slower on keygen or sign
+#    at any level. On failure the job goes red AND opens/updates a tracking issue
+#    (one per arch, de-duplicated); on recovery it closes that issue. Runs on
+#    OpenSSL 3.4 (oqs-provider serves ML-DSA only below 3.5).
+#
+# 2. perf-numbers (regression gate + numbers) -- measures this-provider-vs-
+#    default-provider speed-ups across OpenSSL 3.5 + 4.0 and both architectures.
+#    It publishes a Markdown table (the numbers behind the README Performance
+#    tables) to each job summary AND enforces a floor: the job fails (and
+#    opens/updates a per-arch/per-version tracking issue) if any op drops below
+#    MLDSA_MIN_SPEEDUP vs the default provider, closing the issue on recovery.
+#    Like the oqs gate, a collapse toward ~1x almost always means the native
+#    backend regressed to portable C. Kept here (nightly) rather than in ci.yml
+#    so it never burdens the push/PR path; benchmarking every commit is wasteful
+#    and noisy on shared runners.
 
 on:
   schedule:
@@ -22,6 +35,11 @@ permissions:
 env:
   # Fail if oqs-provider is more than this many times faster than us.
   MLDSA_MAX_SLOWDOWN: '1.5'
+  # Fail the vs-default gate if any op drops below this speed-up vs the default
+  # provider. Set well below the observed native ratios (x86_64 AVX2 keygen ~4x,
+  # aarch64 NEON keygen ~2.9x) so it won't flap, but above 1x so a regression to
+  # portable C (speed-up -> ~1x) trips it.
+  MLDSA_MIN_SPEEDUP: '2.0'
 
 jobs:
   bench:
@@ -140,4 +158,138 @@ jobs:
         if: steps.bench.outputs.result == 'fail'
         run: |
           echo "::error::ML-DSA performance regressed vs oqs-provider on ${{ matrix.arch }}"
+          exit 1
+
+  # Informational: this provider vs the OpenSSL default provider, across OpenSSL
+  # versions and architectures. These are the numbers behind the README
+  # Performance tables. Each matrix leg publishes a Markdown table to its job
+  # summary (test/benchmark.sh appends to $GITHUB_STEP_SUMMARY). Never runs on
+  # push/PR -- only nightly (and on manual dispatch).
+  perf-numbers:
+    name: perf ${{ matrix.arch }} / ${{ matrix.ossl-branch }} vs default
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Only OpenSSL >= 3.5 ships a default-provider ML-DSA to compare against.
+          - { runner: ubuntu-latest,    arch: x86_64,  ossl-branch: openssl-3.5 }
+          - { runner: ubuntu-latest,    arch: x86_64,  ossl-branch: openssl-4.0 }
+          - { runner: ubuntu-24.04-arm, arch: aarch64, ossl-branch: openssl-3.5 }
+          - { runner: ubuntu-24.04-arm, arch: aarch64, ossl-branch: openssl-4.0 }
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build git
+
+      - name: Cache OpenSSL build
+        id: cache-ossl
+        uses: actions/cache@v5
+        with:
+          path: ${{ github.workspace }}/ossl
+          key: ossl-${{ matrix.arch }}-${{ matrix.ossl-branch }}-v1
+
+      - name: Build OpenSSL (${{ matrix.ossl-branch }})
+        if: steps.cache-ossl.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 -b ${{ matrix.ossl-branch }} \
+            https://github.com/openssl/openssl.git ossl-src
+          cd ossl-src
+          ./Configure --prefix="${{ github.workspace }}/ossl" --libdir=lib no-docs
+          make -j"$(nproc)"
+          make install_sw
+
+      - name: Build the provider (native backend)
+        run: |
+          O="${{ github.workspace }}/ossl"
+          cmake -S . -B build \
+            -DOPENSSL_ROOT_DIR="$O" -DOPENSSL_INCLUDE_DIR="$O/include" \
+            -DOPENSSL_CRYPTO_LIBRARY="$O/lib/libcrypto.so" \
+            -DOPENSSL_SSL_LIBRARY="$O/lib/libssl.so"
+          cmake --build build -j"$(nproc)"
+
+      # Smoke-test that the provider still builds and passes against this OpenSSL
+      # (this is also our build/test coverage for the newer OpenSSL 4.0 line).
+      - name: Run tests (KAT + interop + IETF pqc-certificates)
+        run: |
+          O="${{ github.workspace }}/ossl"
+          LD_LIBRARY_PATH="$O/lib" ctest --test-dir build --output-on-failure --no-tests=error
+
+      - name: Benchmark vs default provider (gate + job summary)
+        id: perf
+        run: |
+          O="${{ github.workspace }}/ossl"
+          set +e
+          OPENSSL="$O/bin/openssl" OPENSSL_LIBPATH="$O/lib" \
+            MODULE_DIR="$PWD/build" SECONDS_PER=2 \
+            MLDSA_MIN_SPEEDUP="$MLDSA_MIN_SPEEDUP" \
+            bash test/benchmark.sh 2>&1 | tee perf-output.txt
+          rc=${PIPESTATUS[0]}
+          set -e
+          if   [ "$rc" -eq 0 ];  then echo "result=pass" >> "$GITHUB_OUTPUT"
+          elif [ "$rc" -eq 77 ]; then echo "result=skip" >> "$GITHUB_OUTPUT"
+          else                        echo "result=fail" >> "$GITHUB_OUTPUT"
+          fi
+          echo "exit code: $rc"
+
+      - name: Open/update tracking issue on regression
+        if: always() && steps.perf.outputs.result == 'fail'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const arch = '${{ matrix.arch }}';
+            const ossl = '${{ matrix.ossl-branch }}';
+            const marker = `<!-- perf-vs-default:${arch}:${ossl} -->`;
+            const title = `⚠️ Nightly perf regression vs default provider (${arch}, ${ossl})`;
+            let out = '';
+            try { out = fs.readFileSync('perf-output.txt', 'utf8'); } catch (e) {}
+            const tail = out.slice(-4000);
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const owner = context.repo.owner, repo = context.repo.repo;
+            const issues = await github.paginate(github.rest.issues.listForRepo,
+              { owner, repo, state: 'open', per_page: 100 });
+            const existing = issues.find(i => (i.body || '').includes(marker));
+            if (existing) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: existing.number,
+                body: `Still below ${process.env.MLDSA_MIN_SPEEDUP}x vs the default provider on **${arch} / ${ossl}**. ${runUrl}\n\n\`\`\`\n${tail}\n\`\`\`` });
+            } else {
+              try { await github.rest.issues.createLabel({ owner, repo, name: 'perf-regression', color: 'd73a4a',
+                description: 'ML-DSA performance regression' }); } catch (e) {}
+              const body = `${marker}\n\nThe nightly ML-DSA performance guard failed on **${arch} / ${ossl}**: at least one op `
+                + `dropped below ${process.env.MLDSA_MIN_SPEEDUP}x vs the OpenSSL default provider, which almost always means `
+                + `the native (asm) backend regressed to portable C — check that the build still passes \`-mavx2\` (x86_64) `
+                + `and reports \`native ... asm\` in its build info.\n\nRun: ${runUrl}\n\n\`\`\`\n${tail}\n\`\`\``;
+              await github.rest.issues.create({ owner, repo, title, body, labels: ['perf-regression'] });
+            }
+
+      - name: Close tracking issue on recovery
+        if: always() && steps.perf.outputs.result == 'pass'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const arch = '${{ matrix.arch }}';
+            const ossl = '${{ matrix.ossl-branch }}';
+            const marker = `<!-- perf-vs-default:${arch}:${ossl} -->`;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const owner = context.repo.owner, repo = context.repo.repo;
+            const issues = await github.paginate(github.rest.issues.listForRepo,
+              { owner, repo, state: 'open', per_page: 100 });
+            const existing = issues.find(i => (i.body || '').includes(marker));
+            if (existing) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: existing.number,
+                body: `✅ Recovered on **${arch} / ${ossl}**: back above ${process.env.MLDSA_MIN_SPEEDUP}x vs the default provider. Closing. ${runUrl}` });
+              await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: 'closed' });
+            }
+
+      - name: Fail the job if a regression was detected
+        if: steps.perf.outputs.result == 'fail'
+        run: |
+          echo "::error::ML-DSA performance regressed vs the default provider on ${{ matrix.arch }} / ${{ matrix.ossl-branch }}"
           exit 1

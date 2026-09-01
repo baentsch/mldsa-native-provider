@@ -109,34 +109,14 @@ EVP_set_default_properties(libctx, "?provider=mldsanative");
 
 ## 5. Performance and platform targeting
 
-A benchmark is provided as a worked example of the selection above:
+The property-query selection above is exactly what `test/benchmark.sh` uses to
+compare this provider against the default provider. On CPUs with an mldsa-native
+asm backend (x86_64 AVX2, AArch64 NEON) this provider is several times faster than
+the portable-C default; on other architectures — or with
+`-DMLDSA_NATIVE_BACKEND=PORTABLE` — it falls back to portable C, so any speed-up
+is **specific to the CPU and the build's backend** (the active backend is shown by
+`openssl list -providers -verbose` in the `build info` line).
 
-```sh
-OPENSSL=/path/to/openssl OPENSSL_LIBPATH=/path/to/openssl/lib \
-MODULE_DIR=/path/to/build  test/benchmark.sh
-```
-
-It runs `openssl speed` for each level under both providers and prints a
-comparison plus the machine and the active backend.
-
-**Read the numbers with the platform in mind:**
-
-- **mldsa-native** ships CPU-optimized **assembly backends for x86_64 (AVX2)
-  and AArch64**. On those CPUs this provider runs the native backend and is
-  markedly faster (roughly 1.4–2× on keygen/sign/verify in our x86_64 runs).
-  On any other architecture — or when built with
-  `-DMLDSA_NATIVE_BACKEND=PORTABLE` — it uses portable C.
-- **OpenSSL's default-provider ML-DSA is portable C on every platform.**
-- So any speed-up figure is **specific to the CPU and the build's backend**.
-  Measure on your target hardware; do not carry an x86_64-AVX2 result over to a
-  portable-C or non-supported architecture. The active backend is shown in
-  `openssl list -providers -verbose` (the `build info` line) and in the
-  benchmark header.
-
-Backend selection at build time:
-
-| `-DMLDSA_NATIVE_BACKEND=` | effect |
-|---|---|
-| `AUTO` (default) | native asm on x86_64/AArch64, else portable C |
-| `NATIVE` | force native asm (errors on unsupported CPUs) |
-| `PORTABLE` | force portable C everywhere (apples-to-apples vs default) |
+Per-level and per-version tables, the measurement methodology, how to reproduce
+the numbers in your own environment, and the nightly CI performance gates all live
+in **[docs/PERFORMANCE.md](docs/PERFORMANCE.md)**.
